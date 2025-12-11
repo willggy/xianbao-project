@@ -1,0 +1,34 @@
+name: Auto Crawl Every 10min
+
+on:
+  # 设置定时运行：每10分钟运行一次
+  schedule:
+    - cron: "*/10 * * * *"
+  # 允许手动触发，方便测试
+  workflow_dispatch:
+
+jobs:
+  crawl:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v3
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          # 使用最新的 Python 3 版本
+          python-version: "3.x"
+
+      - name: Install dependencies
+        # 安装爬虫所需库
+        run: pip install requests beautifulsoup4
+
+      - name: Run crawler
+        # 执行爬虫脚本
+        run: python crawler.py
+        env:
+          # ❗ 关键：从 GitHub Secrets 注入 Worker API 地址 ❗
+          # 确保您已在 Secrets 中设置了 API_WORKER_URL
+          API_WORKER_URL: ${{ secrets.API_WORKER_URL }}
