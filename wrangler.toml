@@ -1,8 +1,0 @@
-name = "xianbao-api-worker" # 您Worker的名称
-main = "cloudflare/worker.js" # Worker的入口文件
-compatibility_date = "2024-01-01"
-
-[[d1_databases]]
-binding = "DB"  #  必须与 worker.js 中使用的 env.DB 匹配 
-database_name = "xianbao_db" # 替换为您在 Step 2 中创建的数据库名称
-database_id = "835428b4-239b-486f-8e83-60f01a071bcb" # 替换为您在 Cloudflare 仪表盘上找到的 D1 ID
