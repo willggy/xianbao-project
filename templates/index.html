@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>线报聚合</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css" rel="stylesheet">
+    <style>
+        :root {
+            --bg-color: #f5f5f7;
+            --header-bg: rgba(255, 255, 255, 0.85);
+            --item-active: #e5e5e5;
+            --text-main: #1d1d1f;
+            --text-sub: #86868b;
+        }
+
+        body {
+            background-color: var(--bg-color);
+            font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+            color: var(--text-main);
+            margin: 0;
+            padding-bottom: 30px;
+        }
+
+        /* 顶部固定区域 */
+        .app-header {
+            position: sticky;
+            top: 0;
+            z-index: 1000;
+            background: var(--header-bg);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            border-bottom: 1px solid rgba(0,0,0,0.1);
+        }
+
+        /* 标题栏 */
+        .title-bar {
+            padding: 12px 15px 5px 15px;
+            font-weight: 700;
+            font-size: 1.2rem;
+            color: #000;
+            display: flex;
+            align-items: center;
+        }
+
+        /* 标签滚动条 */
+        .nav-scroller {
+            padding: 8px 15px 12px 15px;
+            white-space: nowrap;
+            overflow-x: auto;
+            -webkit-overflow-scrolling: touch;
+            display: flex;
+            gap: 10px;
+        }
+        .nav-scroller::-webkit-scrollbar { display: none; }
+
+        .nav-pill {
+            display: inline-block;
+            padding: 6px 14px;
+            border-radius: 18px;
+            font-size: 13px;
+            font-weight: 500;
+            text-decoration: none;
+            color: var(--text-main);
+            background: rgba(0,0,0,0.05);
+            transition: all 0.2s;
+        }
+        
+        .nav-pill.active {
+            background: #007aff;
+            color: white;
+            box-shadow: 0 2px 8px rgba(0, 122, 255, 0.25);
+        }
+
+        /* 列表区域 */
+        .list-container {
+            max-width: 800px;
+            margin: 0 auto;
+            background: #fff;
+        }
+        
+        /* 平板以上设备让列表悬浮 */
+        @media (min-width: 768px) {
+            .list-container {
+                margin-top: 20px;
+                border-radius: 12px;
+                box-shadow: 0 4px 12px rgba(0,0,0,0.03);
+                overflow: hidden;
+            }
+        }
+
+        .list-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 14px 16px;
+            border-bottom: 1px solid #efefef;
+            text-decoration: none;
+            color: inherit;
+            transition: background 0.1s ease;
+            cursor: pointer;
+        }
+        
+        /* 最后一项去掉底边框 */
+        .list-item:last-child {
+            border-bottom: none;
+        }
+
+        .list-item:active {
+            background-color: var(--item-active);
+        }
+
+        .item-title {
+            font-size: 15px;
+            line-height: 1.5;
+            color: #000;
+            font-weight: 400;
+            flex-grow: 1;
+            margin-right: 15px;
+            word-break: break-all;
+        }
+
+        .item-time {
+            font-size: 12px;
+            color: var(--text-sub);
+            white-space: nowrap;
+            font-family: "SF Mono", Menlo, monospace;
+            flex-shrink: 0;
+        }
+        
+        .list-item:visited .item-title {
+            color: #888;
+        }
+
+        /* 分页 */
+        .pagination-simple {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 25px 0;
+            gap: 20px;
+        }
+        .page-btn {
+            text-decoration: none;
+            color: var(--text-main);
+            padding: 6px 18px;
+            background: #fff;
+            border: 1px solid rgba(0,0,0,0.1);
+            border-radius: 20px;
+            font-size: 13px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.02);
+        }
+        .page-btn.disabled {
+            opacity: 0.4;
+            pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- 顶部导航栏 -->
+    <header class="app-header">
+        <div class="container" style="max-width: 800px; margin: 0 auto; padding: 0;">
+            <div class="title-bar">
+                <i class="bi bi-activity" style="color: #007aff; margin-right: 8px;"></i> 线报聚合
+            </div>
+            
+            <nav class="nav-scroller">
+                <a href="/" class="nav-pill {{ 'active' if not current_tag else '' }}">全部</a>
+                {% for item in bank_tag_list %}
+                    {% if item.tag %}
+                    <a href="/?tag={{ item.tag }}" 
+                       class="nav-pill {{ 'active' if current_tag == item.tag else '' }}">
+                       {{ item.name }}
+                    </a>
+                    {% endif %}
+                {% endfor %}
+            </nav>
+        </div>
+    </header>
+
+    <!-- 列表内容 -->
+    <div class="list-container">
+        {% if articles %}
+            {% for article in articles %}
+            <!-- 去掉了 target="_blank"，现在会在当前页跳转 -->
+            <a href="{{ article.view_link }}" class="list-item">
+                <div class="item-title">
+                    {{ article.title }}
+                </div>
+                <div class="item-time">
+                    {{ article.time }}
+                </div>
+            </a>
+            {% endfor %}
+        {% else %}
+            <div class="text-center py-5 text-muted" style="font-size: 14px;">
+                <i class="bi bi-arrow-repeat spin"></i> 暂无数据，建议刷新
+            </div>
+        {% endif %}
+    </div>
+
+    <!-- 简易分页 -->
+    {% if total_pages > 1 %}
+    <div class="pagination-simple">
+        <a href="/?page={{ current_page - 1 }}{{ '&tag=' + current_tag if current_tag else '' }}" 
+           class="page-btn {{ 'disabled' if current_page == 1 else '' }}">
+           上一页
+        </a>
+        <span style="font-size: 13px; color: #999;">
+            {{ current_page }} / {{ total_pages }}
+        </span>
+        <a href="/?page={{ current_page + 1 }}{{ '&tag=' + current_tag if current_tag else '' }}" 
+           class="page-btn {{ 'disabled' if current_page == total_pages else '' }}">
+           下一页
+        </a>
+    </div>
+    {% endif %}
+
+</body>
+</html>

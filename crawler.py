@@ -1,126 +1,170 @@
+# crawler.py - 适用于 Zeabur MySQL 直写
 import requests
 from bs4 import BeautifulSoup
-import urllib.parse
-import time
 import os
+import mysql.connector
+from datetime import datetime
+import time
 
-API = os.environ.get("API_WORKER_URL", "https://xianbao-api-worker.gaoguanyu777.workers.dev/api") 
-
-TARGET_DOMAIN = "https://new.xianbao.fun"
-
-HEADERS = {
-    "User-Agent": "Mozilla/5.0",
-    "Referer": TARGET_DOMAIN
+# --- 数据库配置区 ---
+# 爬虫作为独立服务运行，直接使用 Zeabur 注入的 MySQL 环境变量
+MYSQL_CONFIG = {
+    'host': os.environ.get('DB_HOST', 'localhost'),
+    'user': os.environ.get('DB_USER', 'root'),
+    'password': os.environ.get('DB_PASSWORD', 'your_password'),
+    'database': os.environ.get('DB_DATABASE', 'xianbao_db'),
+    'port': os.environ.get('DB_PORT', 3306),
 }
 
-KEYWORDS = ["hang", "行", "立减金", "ljj", "水", "红包", "券"]
-EXCLUDE = ["排行榜", "排 行 榜", "榜单"]
+# 爬虫和清理配置
+MAX_RECORDS = 200 # 最多保存200条数据
 
-def save_list(title, url, keyword):
-    requests.post(f"{API}/save_list", json={
-        "title": title,
-        "url": url,
-        "match": keyword
-    })
+# --- 爬虫配置 ---
+TARGET_DOMAIN = "https://new.xianbao.fun"
+KEYWORDS = ["hang", "行", "立减金", "ljj", "水", "红包", "券"] 
+EXCLUSION_KEYWORDS = ["排行榜", "排 行 榜", "榜单"] 
+HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Referer': TARGET_DOMAIN
+}
 
-def save_content(url, html):
-    requests.post(f"{API}/save_content", json={
-        "url": url,
-        "content": html
-    })
+# --- 数据库操作函数 ---
 
-def extract_content_html(target_url):
-    resp = requests.get(target_url, headers=HEADERS, timeout=15)
-    resp.encoding = "utf-8"
+def get_mysql_conn():
+    """连接到 Zeabur 提供的 MySQL 数据库"""
+    try:
+        conn = mysql.connector.connect(**MYSQL_CONFIG)
+        return conn
+    except mysql.connector.Error as err:
+        print(f"致命错误: MySQL连接失败: {err}")
+        raise
 
-    soup = BeautifulSoup(resp.text, "html.parser")
+def init_db(conn):
+    """确保表结构存在 (与 app.py 中保持一致)"""
+    c = conn.cursor()
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS articles (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            title VARCHAR(512) NOT NULL,
+            url VARCHAR(2048) UNIQUE NOT NULL,
+            match_keyword VARCHAR(100),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS article_content (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            url VARCHAR(2048) UNIQUE NOT NULL,
+            content MEDIUMTEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            FOREIGN KEY (url) REFERENCES articles(url)
+        )
+    """)
+    conn.commit()
+    c.close()
 
-    content = soup.find("td", class_="t_f") \
-           or soup.find("div", class_="message") \
-           or soup.find("div", class_="content")
+def save_article(conn, title, url, match_kw):
+    """保存或更新文章数据 (使用 ON DUPLICATE KEY UPDATE)"""
+    c = conn.cursor()
+    # MySQL 语法：INSERT ... ON DUPLICATE KEY UPDATE
+    try:
+        sql = '''
+            INSERT INTO articles (title, url, match_keyword)
+            VALUES (%s, %s, %s)
+            ON DUPLICATE KEY UPDATE 
+                title = VALUES(title), 
+                match_keyword = VALUES(match_keyword),
+                updated_at = CURRENT_TIMESTAMP()
+        '''
+        c.execute(sql, (title, url, match_kw))
+        conn.commit()
+        return c.rowcount > 0 # 返回是否成功插入或更新
+    except Exception as e:
+        print(f"数据库写入失败: {e}")
+        return False
+    finally:
+        c.close()
 
-    if not content:
-        divs = soup.find_all("div")
-        if divs:
-            content = max(divs, key=lambda t: len(t.get_text()))
+def cleanup_old_records(conn):
+    """清理旧记录，保持最多 MAX_RECORDS 条"""
+    c = conn.cursor()
+    c.execute('SELECT COUNT(*) FROM articles')
+    count = c.fetchone()[0]
+    
+    if count > MAX_RECORDS:
+        delete_count = count - MAX_RECORDS
+        # MySQL 逻辑：先找出最早的记录 ID，然后删除
+        c.execute(f'''
+            DELETE FROM articles 
+            ORDER BY created_at ASC 
+            LIMIT {delete_count}
+        ''')
+        
+        # 简单清理 content 表中没有对应 articles 的记录 (需要外键支持)
+        # 也可以手动清理，此处为了简化，仅清理 articles
+        
+        conn.commit()
+        print(f"MySQL已清理 {delete_count} 条旧记录")
+    
+    c.close()
 
-    if not content:
-        return "<div>无法提取正文</div>"
+# --- 爬虫核心逻辑 ---
 
-    for tag in content(["script", "style", "iframe"]):
-        tag.extract()
+def run_crawler():
+    """运行爬虫主函数"""
+    print(f"[{datetime.now()}] 🚀 爬虫启动，目标: {TARGET_DOMAIN}")
+    
+    conn = None
+    try:
+        conn = get_mysql_conn()
+        init_db(conn) # 确保表存在
+        
+        resp = requests.get(TARGET_DOMAIN + "/", headers=HEADERS, timeout=30)
+        resp.encoding = 'utf-8'
+        soup = BeautifulSoup(resp.text, 'html.parser')
+        
+        rows = soup.find_all('tr') 
+        if not rows: 
+            rows = soup.find_all('li')
+        
+        total_saved = 0
+        
+        for row in rows:
+            link = row.find('a')
+            if not link: continue
+            
+            title = link.get_text().strip()
+            title_lower = title.lower()
+            
+            # 排除关键词过滤
+            if any(ex_kw.lower() in title_lower for ex_kw in EXCLUSION_KEYWORDS):
+                continue
+            
+            href = link.get('href')
+            if href and not href.startswith('http'):
+                href = TARGET_DOMAIN + (href if href.startswith('/') else '/' + href)
+            
+            # 关键词匹配和保存
+            for kw in KEYWORDS:
+                if kw.lower() in title_lower:
+                    if save_article(conn, title, href, kw):
+                        total_saved += 1
+                    break
+        
+        print(f"[{datetime.now()}] ✅ 爬虫完成。总共处理了 {len(rows)} 条数据，保存/更新了 {total_saved} 条记录。")
+        cleanup_old_records(conn) # 清理旧记录
+        
+    except requests.exceptions.RequestException as e:
+        print(f"网络请求失败: {e}")
+    except mysql.connector.Error as e:
+        print(f"数据库操作失败: {e}")
+    except Exception as e:
+        print(f"发生未知错误: {e}")
+    finally:
+        if conn:
+            conn.close()
 
-    for img in content.find_all("img"):
-        src = img.get("src") or img.get("file")
-        if not src:
-            continue
-        if not src.startswith("http"):
-            if src.startswith("/"):
-                src = TARGET_DOMAIN + src
-            else:
-                src = TARGET_DOMAIN + "/" + src
-        img["src"] = src
-        if "lazyloadthumb" in img.attrs:
-            del img["lazyloadthumb"]
-
-    for elem in content.find_all(True):
-        txt = elem.get_text()
-        if any(x in txt for x in [
-            "本文关联的评论", "发表评论",
-            "发布评论", "条评论", "评论列表"
-        ]):
-            parent = elem.find_parent(["div", "tr", "td", "table"])
-            if parent and len(parent.get_text()) < 800:
-                parent.extract()
-
-    return str(content)
-
-def crawl_once():
-    print("开始爬取列表...")
-
-    resp = requests.get(TARGET_DOMAIN + "/", headers=HEADERS, timeout=15)
-    resp.encoding = "utf-8"
-
-    soup = BeautifulSoup(resp.text, "html.parser")
-    rows = soup.find_all("tr") or soup.find_all("li")
-
-    for row in rows:
-        a = row.find("a")
-        if not a:
-            continue
-
-        title = a.get_text().strip()
-        title_lower = title.lower()
-
-        if any(kw.lower() in title_lower for kw in EXCLUDE):
-            continue
-
-        url = a.get("href")
-        if not url.startswith("http"):
-            if url.startswith("/"):
-                url = TARGET_DOMAIN + url
-            else:
-                url = TARGET_DOMAIN + "/" + url
-
-        matched_kw = None
-        for kw in KEYWORDS:
-            if kw.lower() in title_lower:
-                matched_kw = kw
-                break
-
-        if not matched_kw:
-            continue
-
-        print("保存列表：", title)
-        save_list(title, url, matched_kw)
-
-        print("抓取正文：", url)
-        html = extract_content_html(url)
-        save_content(url, html)
-
-        time.sleep(1)
-
-    print("任务完成！")
-
-if __name__ == "__main__":
-    crawl_once()
+if __name__ == '__main__':
+    run_crawler()
