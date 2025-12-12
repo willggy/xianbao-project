@@ -1,5 +1,6 @@
-Flask
-requests
-beautifulsoup4
-waitress
-APScheduler
+Flask==2.3.5
+requests==2.31.0
+beautifulsoup4==4.12.2
+lxml==4.9.3
+apscheduler==3.10.5
+waitress==2.1.2
