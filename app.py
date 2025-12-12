@@ -3,7 +3,8 @@ import os
 import re
 import sqlite3
 import atexit
-from datetime import datetime
+import threading
+from datetime import datetime, timedelta
 import requests
 from flask import Flask, render_template, request
 from bs4 import BeautifulSoup
@@ -13,9 +14,10 @@ from waitress import serve
 app = Flask(__name__)
 
 # ---------------- Zeabur 配置 ----------------
-DATA_DIR = os.environ.get('DATA_DIR', '/app/data')
+DATA_DIR = os.environ.get("DATA_DIR", "./data")
 os.makedirs(DATA_DIR, exist_ok=True)
-DB_PATH = os.path.join(DATA_DIR, 'xianbao.db')
+DB_PATH = os.path.join(DATA_DIR, "xianbao.db")
+print("Server starting...", "DATA_DIR=" + DATA_DIR, "DB_PATH=" + DB_PATH)
 
 REQUEST_TIMEOUT = 15
 PER_PAGE = 30
@@ -45,55 +47,88 @@ def init_db_if_needed():
         content TEXT,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS scrape_log(
+        id INTEGER PRIMARY KEY,
+        last_scrape TIMESTAMP
+    )''')
     conn.commit()
     conn.close()
 
 init_db_if_needed()
 
-# ---------------- 爬虫逻辑 ----------------
-def scrape_list():
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] 开始抓取...")
-    url = TARGET_DOMAIN + "/"
+# ---------------- 抓取列表逻辑 ----------------
+def scrape_list(force=False):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    count = 0
+    
+    # 检查时间间隔（30秒内不重复抓取）
+    if not force:
+        c.execute('SELECT last_scrape FROM scrape_log WHERE id=1')
+        row = c.fetchone()
+        if row and row[0]:
+            try:
+                last_time = datetime.strptime(row[0], "%Y-%m-%d %H:%M:%S")
+                if datetime.now() - last_time < timedelta(seconds=30):
+                    conn.close()
+                    return False
+            except ValueError:
+                pass
+
+    # print(f"[{datetime.now().strftime('%H:%M:%S')}] 开始检查更新...") # 可选：如觉得太吵可注释
+    url = TARGET_DOMAIN + "/"
     try:
         resp = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
         resp.encoding = 'utf-8'
         soup = BeautifulSoup(resp.text, "html.parser")
         rows = soup.select("tr, li")
+        
+        insert_list = []
         for row in rows:
             a_tag = row.select_one("a[href*='view']") or row.select_one("a[href*='thread']") or row.select_one("a")
-            if not a_tag:
-                continue
+            if not a_tag: continue
+            
             title = a_tag.get_text(strip=True)
             href = a_tag.get("href")
+            
             if not title or not href: continue
             if any(e in title for e in EXCLUSION_KEYWORDS): continue
-
+            
             match_kw = None
             for kw in KEYWORDS:
                 if kw.lower() in title.lower():
                     match_kw = kw
                     break
             if not match_kw: continue
-
+            
             if href.startswith("/"): href = TARGET_DOMAIN + href
             elif not href.startswith("http"): href = TARGET_DOMAIN + "/" + href
-
+            
             row_text = row.get_text(" ", strip=True)
             text_without_title = row_text.replace(title, "")
             time_match = re.search(r'(\d{2}-\d{2}|\d{2}:\d{2}|\d{4}-\d{2}-\d{2})', text_without_title)
             original_time = time_match.group(1) if time_match else datetime.now().strftime("%H:%M")
+            
+            insert_list.append((title, href, match_kw.strip(), original_time))
 
-            c.execute('''INSERT OR IGNORE INTO articles
-                (title, url, match_keyword, original_time, updated_at)
-                VALUES(?,?,?,?,CURRENT_TIMESTAMP)
-            ''', (title, href, match_kw.strip(), original_time))
-            count += 1
-
+        # 记录抓取前的总数，用于计算新增（近似值，因为IGNORE会忽略重复）
+        # 这里为了准确显示新增条数，我们可以用 rowcount，但在IGNORE下 rowcount 行为取决于驱动
+        # 简单处理：只要列表不为空就尝试插入
+        
+        c.executemany('''INSERT OR IGNORE INTO articles
+            (title, url, match_keyword, original_time, updated_at)
+            VALUES(?,?,?,?,CURRENT_TIMESTAMP)
+        ''', insert_list)
+        
+        added_count = c.rowcount # SQLite中 IGNORE 时重复的行 rowcount 为 0
+        
+        c.execute('INSERT OR REPLACE INTO scrape_log(id,last_scrape) VALUES(1,?)',
+                  (datetime.now().strftime("%Y-%m-%d %H:%M:%S"),))
         conn.commit()
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] 抓取结束，新增 {count} 条。")
+        
+        # --- 日志修改：只写更新了几条 ---
+        if added_count > 0:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] 抓取完成，新增 {added_count} 条")
+        
         return True
     except Exception as e:
         print(f"Scrape error: {e}")
@@ -101,12 +136,14 @@ def scrape_list():
     finally:
         conn.close()
 
-# ---------------- 获取列表 ----------------
+# ---------------- 获取列表数据 ----------------
 def get_list_data(page=1, per_page=PER_PAGE, tag_keyword=None):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
+    
     where_clause = ""
     params = []
+    
     if tag_keyword:
         clean_tag = tag_keyword.strip()
         if clean_tag in BANK_KEYWORDS.values():
@@ -115,19 +152,20 @@ def get_list_data(page=1, per_page=PER_PAGE, tag_keyword=None):
         else:
             where_clause = "WHERE match_keyword = ?"
             params.append(clean_tag)
-
+            
     c.execute(f'SELECT COUNT(*) FROM articles {where_clause}', params)
     total_count = c.fetchone()[0]
-
+    
     if total_count == 0 and not tag_keyword:
         conn.close()
-        if scrape_list():
+        if scrape_list(force=True):
             return get_list_data(page, per_page, tag_keyword)
         else:
             return [], 0, 1
-
+            
     total_pages = (total_count + per_page - 1) // per_page if total_count else 1
     offset = (page - 1) * per_page
+    
     c.execute(f'''
         SELECT id, title, url, original_time
         FROM articles
@@ -135,9 +173,10 @@ def get_list_data(page=1, per_page=PER_PAGE, tag_keyword=None):
         ORDER BY id DESC
         LIMIT ? OFFSET ?
     ''', params + [per_page, offset])
+    
     db_data = c.fetchall()
     conn.close()
-
+    
     data = []
     for row in db_data:
         data.append({
@@ -147,8 +186,11 @@ def get_list_data(page=1, per_page=PER_PAGE, tag_keyword=None):
         })
     return data, total_count, total_pages
 
-# ---------------- 获取详情 ----------------
+# ---------------- 获取文章内容 ----------------
 def get_article_content(article_id):
+    if not article_id:
+        return "文章不存在", "Error", None
+        
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('SELECT url, title FROM articles WHERE id=?', (article_id,))
@@ -157,32 +199,72 @@ def get_article_content(article_id):
         conn.close()
         return "文章不存在", "Error", None
     target_url, title = res
+    
     c.execute('SELECT content FROM article_content WHERE url=?', (target_url,))
     cached = c.fetchone()
     conn.close()
 
-    def clean(html):
-        if not html: return ""
-        soup = BeautifulSoup(html, "html.parser")
-        for cls in ['head-info', 'mochu_us_shoucang', 'mochu-us-coll', 'xg1', 'y', 'top_author_desc']:
-            for tag in soup.find_all(class_=cls):
-                tag.decompose()
+    def clean(html_content):
+        if not html_content: return ""
+        soup = BeautifulSoup(html_content, "html.parser")
+        
+        # 移除常规干扰
+        for cls in ['head-info', 'mochu_us_shoucang', 'mochu-us-coll', 'xg1', 'y', 'top_author_desc', 'rate', 'modact']:
+            for tag in soup.find_all(class_=cls): tag.decompose()
+        
+        # 移除标题防止重复
+        for h1 in soup.find_all('h1'): h1.decompose()
+        for subject in soup.select('#thread_subject, .ts'): subject.decompose()
+
+        # 图片处理
         for img in soup.find_all('img'):
             img['loading'] = 'lazy'
             if 'width' in img.attrs: del img.attrs['width']
             if 'height' in img.attrs: del img.attrs['height']
-        for a in soup.find_all('a'): a.replace_with(a.get_text())
-        for h in soup.find_all(re.compile('^h[1-6]$')): h.decompose()
-        return str(soup)
+            if img.get('src', '').startswith('/'):
+                img['src'] = TARGET_DOMAIN + img['src']
 
+        text = str(soup)
+        link_ptn = re.compile(r'(?<!["\'/=])(\bhttps?://[^\s<>"\'\u4e00-\u9fa5]+)')
+        text = link_ptn.sub(lambda m: f'<a href="{m.group(1)}" target="_blank">{m.group(1)}</a>', text)
+        return text
+
+    # --- 命中缓存 ---
     if cached and cached[0]:
+        # 日志已移除：不用写点哪个文章了
         return clean(cached[0]), title, target_url
 
+    # --- 无缓存，抓取详情 ---
     try:
         r = requests.get(target_url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
         r.encoding = 'utf-8'
-        soup = BeautifulSoup(r.text, 'html.parser')
-        node = soup.find('td', class_='t_f') or soup.find('div', class_='message') or soup.select_one('div[class*="content"]')
+        full_soup = BeautifulSoup(r.text, 'html.parser')
+
+        # === 针对性移除指定ID元素 ===
+        # 1. 移除评论框: //*[@id="commentbox"]
+        for cb in full_soup.select('#commentbox'):
+            cb.decompose()
+
+        # 2. 移除主盒子下第一个div: //*[@id="mainbox"]/div[1]
+        mainbox = full_soup.select_one('#mainbox')
+        if mainbox:
+            # 获取 direct children divs
+            direct_divs = mainbox.find_all('div', recursive=False)
+            if direct_divs:
+                direct_divs[0].decompose()
+            
+            # 3. 移除文章下第一个div: //*[@id="mainbox"]/article/div[1]
+            article = mainbox.find('article', recursive=False)
+            if article:
+                art_divs = article.find_all('div', recursive=False)
+                if art_divs:
+                    art_divs[0].decompose()
+        
+        # 尝试精简提取
+        node = full_soup.find('td', class_='t_f') or \
+               full_soup.find('div', class_='message') or \
+               full_soup.select_one('div[class*="content"]')
+               
         if node:
             content = str(node)
             conn = sqlite3.connect(DB_PATH)
@@ -193,7 +275,9 @@ def get_article_content(article_id):
                 conn.commit()
             finally:
                 conn.close()
+            # 日志已移除
             return clean(content), title, target_url
+            
         return "无法提取正文", title, target_url
     except Exception as e:
         return f"Error: {e}", title, target_url
@@ -203,28 +287,36 @@ def get_article_content(article_id):
 def index():
     tag = request.args.get('tag')
     page = request.args.get('page', 1, type=int)
+    
+    # 异步触发抓取，不阻塞页面加载
+    if page == 1 and not tag:
+        threading.Thread(target=scrape_list, args=(False,)).start()
+    
     articles, total, pages = get_list_data(page, PER_PAGE, tag)
     tags = [{"name": "全部", "tag": None}] + \
            [{"name": k, "tag": v} for k, v in BANK_KEYWORDS.items()] + \
            [{"name": "立减金", "tag": "立减金"}, {"name": "红包", "tag": "红包"}]
+           
     return render_template('index.html', articles=articles, current_page=page, total_pages=pages,
                            current_tag=tag, bank_tag_list=tags)
 
 @app.route('/view')
 def view():
-    c, t, _ = get_article_content(request.args.get('id', type=int))
-    return render_template('detail.html', content=c, title=t)
+    # 点文章不触发 scrape_list，只获取详情
+    article_id = request.args.get('id', type=int)
+    content, title, original_url = get_article_content(article_id)
+    return render_template('detail.html', content=content, title=title, original_url=original_url)
 
-# ---------------- 启动 Waitress ----------------
+@app.route('/health')
+def health():
+    return "ok"
+
 if __name__ == '__main__':
-    print(f"Server starting... DATA_DIR={DATA_DIR}, DB_PATH={DB_PATH}")
-    # 首次抓取
     if not os.path.exists(DB_PATH) or os.path.getsize(DB_PATH) < 1000:
-        scrape_list()
-
-    # 定时任务
+        scrape_list(force=True)
+        
     scheduler = BackgroundScheduler()
-    scheduler.add_job(scrape_list, 'interval', minutes=10)
+    scheduler.add_job(scrape_list, 'interval', minutes=10, kwargs={'force': True})
     scheduler.start()
     atexit.register(lambda: scheduler.shutdown())
 
