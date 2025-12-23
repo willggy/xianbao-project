@@ -37,7 +37,7 @@ KEYWORDS = list(BANK_KEYWORDS.values()) + [
 
 app = Flask(__name__)
 # 建议在 Zeabur 挂载硬盘到 /data 目录
-DATA_DIR = "./data"
+DATA_DIR = "/app/data"
 os.makedirs(DATA_DIR, exist_ok=True)
 DB_PATH = os.path.join(DATA_DIR, "xianbao.db")
 
@@ -273,3 +273,4 @@ if __name__ == '__main__':
     # 3. 使用 Waitress 生产级服务器运行
     print(">>> 监控助手已就绪，正在监听端口 8080...")
     serve(app, host='0.0.0.0', port=8080, threads=8)
+
