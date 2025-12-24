@@ -39,10 +39,10 @@ KEYWORDS = list(BANK_KEYWORDS.values()) + [
 ]
 
 app = Flask(__name__)
-DATA_DIR = "/app/data"
-os.makedirs(DATA_DIR, exist_ok=True)
-DB_PATH = os.path.join(DATA_DIR, "xianbao.db")
-
+# DATA_DIR = "/app/data"
+# os.makedirs(DATA_DIR, exist_ok=True)
+# DB_PATH = os.path.join(DATA_DIR, "xianbao.db")
+DB_PATH = "/app/data/xianbao.db"
 PER_PAGE = 30
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36"}
 
@@ -60,7 +60,8 @@ scrape_lock = threading.Lock()
 
 # ================== 2. 数据库与统计逻辑 ==================
 def get_db_connection():
-    conn = sqlite3.connect(DB_PATH, timeout=10)
+    # 增加 timeout 确保在高并发下不会因为文件锁定而报错
+    conn = sqlite3.connect(DB_PATH, timeout=20, check_same_thread=False)
     conn.row_factory = sqlite3.Row 
     return conn
 
@@ -68,22 +69,13 @@ def init_db():
     conn = get_db_connection()
     try:
         conn.execute('PRAGMA journal_mode=WAL;')
-        # 文章基础表
-        conn.execute('''CREATE TABLE IF NOT EXISTS articles(
-            id INTEGER PRIMARY KEY AUTOINCREMENT, 
-            title TEXT, url TEXT UNIQUE, site_source TEXT,
-            match_keyword TEXT, original_time TEXT, 
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-        # 正文内容表
+        # 依次创建四个表
+        conn.execute('CREATE TABLE IF NOT EXISTS articles(id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, url TEXT UNIQUE, site_source TEXT, match_keyword TEXT, original_time TEXT, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)')
         conn.execute('CREATE TABLE IF NOT EXISTS article_content(url TEXT PRIMARY KEY, content TEXT, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)')
-        # 抓取时间记录表
         conn.execute('CREATE TABLE IF NOT EXISTS scrape_log(id INTEGER PRIMARY KEY, last_scrape TIMESTAMP)')
-        # 访客统计表 (IP, 访问次数, 最后访问时间)
-        conn.execute('''CREATE TABLE IF NOT EXISTS visit_stats(
-            ip TEXT PRIMARY KEY, 
-            visit_count INTEGER DEFAULT 1, 
-            last_visit TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+        conn.execute('CREATE TABLE IF NOT EXISTS visit_stats(ip TEXT PRIMARY KEY, visit_count INTEGER DEFAULT 1, last_visit TIMESTAMP DEFAULT CURRENT_TIMESTAMP)')
         conn.commit()
+        print("数据库初始化成功，所有表已检查。")
     finally:
         conn.close()
 
@@ -272,4 +264,5 @@ if __name__ == '__main__':
     scheduler.start()
     print(">>> 监控助手已启动，端口: 8080")
     serve(app, host='0.0.0.0', port=8080, threads=10)
+
 
