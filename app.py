@@ -39,7 +39,7 @@ KEYWORDS = list(BANK_KEYWORDS.values()) + [
 ]
 
 app = Flask(__name__)
-DATA_DIR = "app/data"
+DATA_DIR = "/app/data"
 os.makedirs(DATA_DIR, exist_ok=True)
 DB_PATH = os.path.join(DATA_DIR, "xianbao.db")
 
@@ -272,3 +272,4 @@ if __name__ == '__main__':
     scheduler.start()
     print(">>> 监控助手已启动，端口: 8080")
     serve(app, host='0.0.0.0', port=8080, threads=10)
+
