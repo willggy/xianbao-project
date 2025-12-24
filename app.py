@@ -102,6 +102,7 @@ def record_visit():
     conn.close()
 
 # ================== 3. 核心逻辑 ==================
+# ================== 3. 抓取逻辑 (增加站点区分统计) ==================
 def scrape_all_sites(force=False):
     if scrape_lock.locked(): return
     with scrape_lock:
@@ -110,7 +111,7 @@ def scrape_all_sites(force=False):
         now_str = now_beijing.strftime("%Y-%m-%d %H:%M:%S")
 
         conn = get_db_connection()
-        total_new = 0
+        site_stats = {} # 用于存储各个站点的统计情况
 
         for site_key, config in SITES_CONFIG.items():
             try:
@@ -124,16 +125,13 @@ def scrape_all_sites(force=False):
                     a = item.select_one("a[href*='view'], a[href*='thread'], a[href*='post'], a[href*='.htm']") or item.find("a")
                     if not a: continue
                     
-                    # 抓取真实 href 属性，防止省略号截断
                     href = a.get("href", "")
                     full_url = href if href.startswith("http") else (config['domain'] + (href if href.startswith("/") else "/" + href))
-                    if "new.xianbao.fun/haodan/" in full_url: continue
-
+                    
                     title = a.get_text(strip=True)
                     matched_kw = next((kw for kw in KEYWORDS if kw.lower() in title.lower()), None)
                     if not matched_kw: continue
 
-                    # 标签归一化 (一对多逻辑)
                     final_tag = matched_kw
                     for tag_name, val_list in BANK_KEYWORDS.items():
                         if matched_kw in val_list:
@@ -146,12 +144,15 @@ def scrape_all_sites(force=False):
                 if site_entries:
                     cursor = conn.cursor()
                     cursor.executemany('INSERT OR IGNORE INTO articles (title, url, site_source, match_keyword, original_time) VALUES(?,?,?,?,?)', site_entries)
-                    total_new += cursor.rowcount
+                    site_stats[config['name']] = cursor.rowcount # 记录该站点新增数量
             except Exception as e:
                 print(f"抓取失败 {site_key}: {e}")
 
         duration = time.time() - start_time
-        log_msg = f"[{now_str}] 完成抓取任务，新增 {total_new} 条数据 (耗时 {duration:.2f}s)"
+        # 构建分类统计字符串
+        stats_str = ", ".join([f"{name}+{count}" for name, count in site_stats.items()]) if site_stats else "无新数据"
+        log_msg = f"[{now_str}] 任务完成: {stats_str} (耗时 {duration:.2f}s)"
+        
         conn.execute('INSERT INTO scrape_log(last_scrape) VALUES(?)', (log_msg,))
         conn.execute('DELETE FROM scrape_log WHERE id NOT IN (SELECT id FROM scrape_log ORDER BY id DESC LIMIT 50)')
         conn.commit()
@@ -274,3 +275,4 @@ if __name__ == '__main__':
     scheduler.add_job(scrape_all_sites, 'interval', minutes=10)
     scheduler.start()
     serve(app, host='0.0.0.0', port=8080, threads=10)
+
