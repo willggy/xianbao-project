@@ -29,7 +29,12 @@ SITES_CONFIG = {
     }
 }
 
-BANK_KEYWORDS = {"农行": "农", "工行": "工", "建行": "建", "中行": "中"}
+BANK_KEYWORDS = {
+    "农行": ["农行", "农业银行", "农"],
+    "工行": ["工行", "工商银行", "工"],
+    "建行": ["建行", "建设银行", "建", "CCB"],
+    "中行": ["中行", "中国银行", "中hang"]
+}
 KEYWORDS = list(BANK_KEYWORDS.values()) + [
     "立减金", "红包", "话费", "水", "毛", "招", "hang", "信", "移动",
     "联通", "京东", "支付宝", "微信", "流量", "话费券", "充值",
@@ -145,15 +150,53 @@ def scrape_all_sites(force=False):
         print(f"[{now_str}] <<< 任务完成。新增: {total_new} 条 | 耗时: {duration:.2f}s | 独立访客: {user_count}\n")
 
 def clean_html(html_content, site_key):
-    if not html_content: return ""
+    if not html_content: 
+        return ""
+        
     soup = BeautifulSoup(html_content, "html.parser")
+    
+    # 遍历所有标签进行清洗
     for tag in soup.find_all(True):
-        if tag.name != 'img': 
-            tag.attrs = {}
-        else:
+        # --- 处理图片 ---
+        if tag.name == 'img':
             src = tag.get('src', '')
-            if src.startswith('/'): src = SITES_CONFIG[site_key]['domain'] + src
-            tag.attrs = {'src': f"/img_proxy?url={src}", 'loading': 'lazy', 'style': 'max-width:100%; height:auto; border-radius:8px;'}
+            # 处理相对路径
+            if src.startswith('/'): 
+                src = SITES_CONFIG[site_key]['domain'] + src
+            tag.attrs = {
+                'src': f"/img_proxy?url={src}", 
+                'loading': 'lazy', 
+                'style': 'max-width:100%; height:auto; border-radius:8px;'
+            }
+            
+        # --- 处理链接 (修复核心问题) ---
+        elif tag.name == 'a':
+            real_href = tag.get('href', '')
+            # 补全相对路径
+            if real_href.startswith('/'):
+                real_href = SITES_CONFIG[site_key]['domain'] + real_href
+            
+            # 如果显示文字被截断（包含...），则强制显示完整 URL，防止误导
+            display_text = tag.get_text(strip=True)
+            if "..." in display_text and real_href.startswith('http'):
+                tag.string = real_href 
+            
+            # 重新构建属性，必须保留 href
+            tag.attrs = {
+                'href': real_href,
+                'target': '_blank',
+                'rel': 'noopener noreferrer',
+                'style': 'color: #007aff; text-decoration: underline; word-break: break-all;'
+            }
+            
+        # --- 处理换行和段落 (保持结构) ---
+        elif tag.name in ['br', 'p', 'div']:
+            tag.attrs = {} # 清理 class, id 等冗余属性
+            
+        # --- 其他标签 ---
+        else:
+            tag.attrs = {} # 清理掉 style, class 等，只留纯标签
+            
     return str(soup)
 
 # ================== 4. 路由 ==================
@@ -190,51 +233,49 @@ def index():
         bank_tag_list=tags
     )
 
-@app.route('/view')
+@app.route("/view")
 def view():
-    article_id = request.args.get('id', type=int)
+    article_id = request.args.get("id", type=int)
     conn = get_db_connection()
-    row = conn.execute('SELECT url, title, site_source FROM articles WHERE id=?', (article_id,)).fetchone()
+    row = conn.execute("SELECT url, title, site_source FROM articles WHERE id=?", (article_id,)).fetchone()
+    
     if not row:
         conn.close()
         return "文章不存在"
-    url, title, site_key = row['url'], row['title'], row['site_source']
-    cached = conn.execute('SELECT content FROM article_content WHERE url=?', (url,)).fetchone()
-    conn.close()
 
-    if cached and len(cached['content']) > 50:
-        content = clean_html(cached['content'], site_key)
+    url, title, site_key = row["url"], row["title"], row["site_source"]
+    
+    # 尝试从数据库获取缓存
+    cached = conn.execute("SELECT content FROM article_content WHERE url=?", (url,)).fetchone()
+    
+    if cached and len(cached['content']) > 100:
+        content = clean_html(cached["content"], site_key)
     else:
         try:
-            session.headers.update({"Referer": SITES_CONFIG[site_key]['domain']})
             r = session.get(url, timeout=10)
             r.encoding = 'utf-8'
-            soup = BeautifulSoup(r.text, 'html.parser')
-
-            raw_content = ""
-            if site_key == 'xianbao':
-                selectors = ["#mainbox article .article-content", "#art-fujia"]
-                parts = [str(soup.select_one(sel)) for sel in selectors if soup.select_one(sel)]
-                raw_content = "".join(parts)
-            else:
-                config = SITES_CONFIG.get(site_key)
-                for sel in [s.strip() for s in config['content_selector'].split(',')]:
-                    node = soup.select_one(sel)
-                    if node and len(node.get_text(strip=True)) > 10:
-                        raw_content = str(node)
-                        break
-            if raw_content:
-                conn = get_db_connection()
-                conn.execute('INSERT OR REPLACE INTO article_content(url, content) VALUES(?,?)', (url, raw_content))
-                conn.commit()
-                conn.close()
-                content = clean_html(raw_content, site_key)
-            else:
-                content = "内容抓取失败，请点击查看原文。"
+            soup = BeautifulSoup(r.text, "html.parser")
+            
+            # 采用测试脚本中的多选择器匹配逻辑
+            selector_list = SITES_CONFIG[site_key]["content_selector"].split(',')
+            node = None
+            for sel in selector_list:
+                temp_node = soup.select_one(sel.strip())
+                if temp_node and len(temp_node.get_text(strip=True)) > 10:
+                    node = temp_node
+                    break
+            
+            raw_content = str(node) if node else "无法自动提取正文，请点击原文查看。"
+            
+            # 存入缓存
+            conn.execute("INSERT OR REPLACE INTO article_content(url, content) VALUES(?,?)", (url, raw_content))
+            conn.commit()
+            content = clean_html(raw_content, site_key)
         except Exception as e:
-            content = f"加载异常: {e}"
+            content = f"抓取详情页失败: {e}"
 
-    return render_template('detail.html', content=content, title=title, original_url=url)
+    conn.close()
+    return render_template("detail.html", title=title, content=content, original_url=url)
 
 @app.route('/logs')
 def show_logs():
@@ -265,3 +306,4 @@ if __name__ == '__main__':
     scheduler.start()
     print(">>> 监控助手已启动，端口: 8080")
     serve(app, host='0.0.0.0', port=8080, threads=10)
+
