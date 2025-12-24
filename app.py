@@ -69,13 +69,30 @@ def init_db():
     conn = get_db_connection()
     try:
         conn.execute('PRAGMA journal_mode=WAL;')
-        # 依次创建四个表
-        conn.execute('CREATE TABLE IF NOT EXISTS articles(id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, url TEXT UNIQUE, site_source TEXT, match_keyword TEXT, original_time TEXT, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)')
+        # 显式开启事务
+        conn.execute("BEGIN TRANSACTION;")
+        
+        # 核心：确保创建 visit_stats 表
+        conn.execute('''CREATE TABLE IF NOT EXISTS visit_stats(
+            ip TEXT PRIMARY KEY, 
+            visit_count INTEGER DEFAULT 1, 
+            last_visit TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+            
+        conn.execute('''CREATE TABLE IF NOT EXISTS articles(
+            id INTEGER PRIMARY KEY AUTOINCREMENT, 
+            title TEXT, url TEXT UNIQUE, site_source TEXT,
+            match_keyword TEXT, original_time TEXT, 
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+            
         conn.execute('CREATE TABLE IF NOT EXISTS article_content(url TEXT PRIMARY KEY, content TEXT, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)')
         conn.execute('CREATE TABLE IF NOT EXISTS scrape_log(id INTEGER PRIMARY KEY, last_scrape TIMESTAMP)')
-        conn.execute('CREATE TABLE IF NOT EXISTS visit_stats(ip TEXT PRIMARY KEY, visit_count INTEGER DEFAULT 1, last_visit TIMESTAMP DEFAULT CURRENT_TIMESTAMP)')
-        conn.commit()
-        print("数据库初始化成功，所有表已检查。")
+        
+        # 显式提交
+        conn.execute("COMMIT;")
+        print("  [Database] 数据库所有表结构检查并创建成功。")
+    except Exception as e:
+        conn.execute("ROLLBACK;")
+        print(f"  [Database] 初始化失败并已回滚: {e}")
     finally:
         conn.close()
 
@@ -264,5 +281,6 @@ if __name__ == '__main__':
     scheduler.start()
     print(">>> 监控助手已启动，端口: 8080")
     serve(app, host='0.0.0.0', port=8080, threads=10)
+
 
 
