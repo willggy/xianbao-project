@@ -36,7 +36,6 @@ BANK_KEYWORDS = {
     "中行": ["中行", "中国银行", "中hang"]
 }
 
-# 拍平关键词列表，修复匹配失效问题
 ALL_BANK_VALS = [word for words in BANK_KEYWORDS.values() for word in words]
 OTHER_KEYWORDS = [
     "立减金", "红包", "话费", "水", "毛", "招", "hang", "信", "移动",
@@ -67,26 +66,25 @@ scrape_lock = threading.Lock()
 def get_db_connection():
     conn = sqlite3.connect(DB_PATH, timeout=20, check_same_thread=False)
     conn.row_factory = sqlite3.Row
+    # 自动确保表存在
+    conn.execute('PRAGMA journal_mode=WAL;')
+    conn.execute('''CREATE TABLE IF NOT EXISTS articles(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, 
+        title TEXT, url TEXT UNIQUE, site_source TEXT,
+        match_keyword TEXT, original_time TEXT, 
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    conn.execute('CREATE TABLE IF NOT EXISTS article_content(url TEXT PRIMARY KEY, content TEXT, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)')
+    conn.execute('CREATE TABLE IF NOT EXISTS scrape_log(id INTEGER PRIMARY KEY AUTOINCREMENT, last_scrape TEXT)')
+    conn.execute('''CREATE TABLE IF NOT EXISTS visit_stats(
+        ip TEXT PRIMARY KEY, 
+        visit_count INTEGER DEFAULT 1, 
+        last_visit TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    conn.commit()
     return conn
 
 def init_db():
-    conn = get_db_connection()
-    try:
-        conn.execute('PRAGMA journal_mode=WAL;')
-        conn.execute('''CREATE TABLE IF NOT EXISTS articles(
-            id INTEGER PRIMARY KEY AUTOINCREMENT, 
-            title TEXT, url TEXT UNIQUE, site_source TEXT,
-            match_keyword TEXT, original_time TEXT, 
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-        conn.execute('CREATE TABLE IF NOT EXISTS article_content(url TEXT PRIMARY KEY, content TEXT, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)')
-        conn.execute('CREATE TABLE IF NOT EXISTS scrape_log(id INTEGER PRIMARY KEY AUTOINCREMENT, last_scrape TEXT)')
-        conn.execute('''CREATE TABLE IF NOT EXISTS visit_stats(
-            ip TEXT PRIMARY KEY, 
-            visit_count INTEGER DEFAULT 1, 
-            last_visit TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-        conn.commit()
-    finally:
-        conn.close()
+    # 只是确保数据库文件存在和表创建
+    get_db_connection().close()
 
 def record_visit():
     ip = request.headers.get('X-Forwarded-For', request.remote_addr)
@@ -102,7 +100,6 @@ def record_visit():
     conn.close()
 
 # ================== 3. 核心逻辑 ==================
-# ================== 3. 抓取逻辑 (增加站点区分统计) ==================
 def scrape_all_sites(force=False):
     if scrape_lock.locked(): return
     with scrape_lock:
@@ -111,7 +108,7 @@ def scrape_all_sites(force=False):
         now_str = now_beijing.strftime("%Y-%m-%d %H:%M:%S")
 
         conn = get_db_connection()
-        site_stats = {} # 用于存储各个站点的统计情况
+        site_stats = {}
 
         for site_key, config in SITES_CONFIG.items():
             try:
@@ -124,10 +121,10 @@ def scrape_all_sites(force=False):
                 for item in soup.select(config['list_selector']):
                     a = item.select_one("a[href*='view'], a[href*='thread'], a[href*='post'], a[href*='.htm']") or item.find("a")
                     if not a: continue
-                    
+
                     href = a.get("href", "")
                     full_url = href if href.startswith("http") else (config['domain'] + (href if href.startswith("/") else "/" + href))
-                    
+
                     title = a.get_text(strip=True)
                     matched_kw = next((kw for kw in KEYWORDS if kw.lower() in title.lower()), None)
                     if not matched_kw: continue
@@ -144,15 +141,14 @@ def scrape_all_sites(force=False):
                 if site_entries:
                     cursor = conn.cursor()
                     cursor.executemany('INSERT OR IGNORE INTO articles (title, url, site_source, match_keyword, original_time) VALUES(?,?,?,?,?)', site_entries)
-                    site_stats[config['name']] = cursor.rowcount # 记录该站点新增数量
+                    site_stats[config['name']] = cursor.rowcount
             except Exception as e:
                 print(f"抓取失败 {site_key}: {e}")
 
         duration = time.time() - start_time
-        # 构建分类统计字符串
         stats_str = ", ".join([f"{name}+{count}" for name, count in site_stats.items()]) if site_stats else "无新数据"
         log_msg = f"[{now_str}] 任务完成: {stats_str} (耗时 {duration:.2f}s)"
-        
+
         conn.execute('INSERT INTO scrape_log(last_scrape) VALUES(?)', (log_msg,))
         conn.execute('DELETE FROM scrape_log WHERE id NOT IN (SELECT id FROM scrape_log ORDER BY id DESC LIMIT 50)')
         conn.commit()
@@ -169,7 +165,6 @@ def clean_html(html_content, site_key):
         elif tag.name == 'a':
             real_href = tag.get('href', '')
             if real_href.startswith('/'): real_href = SITES_CONFIG[site_key]['domain'] + real_href
-            # 如果文字被省略，还原为真实 URL
             display_text = tag.get_text(strip=True)
             if "..." in display_text and real_href.startswith('http'):
                 tag.string = real_href 
@@ -190,7 +185,7 @@ def index():
     global last_scrape_time
     current_time = time.time()
     conn = get_db_connection()
-    
+
     if page == 1 and not tag:
         if current_time - last_scrape_time > COOLDOWN_SECONDS:
             last_scrape_time = current_time
@@ -206,8 +201,7 @@ def index():
     conn.close()
 
     articles = [{"title": r['title'], "view_link": f"/view?id={r['id']}", "time": r['original_time']} for r in db_data]
-    
-    # 构造前端标签
+
     tags = [{"name": "全部", "tag": None}]
     for k in BANK_KEYWORDS.keys():
         tags.append({"name": k, "tag": k})
@@ -227,7 +221,7 @@ def view():
 
     url, title, site_key = row["url"], row["title"], row["site_source"]
     cached = conn.execute("SELECT content FROM article_content WHERE url=?", (url,)).fetchone()
-    
+
     if cached and len(cached['content']) > 100:
         content = clean_html(cached["content"], site_key)
     else:
@@ -269,10 +263,14 @@ def img_proxy():
     except:
         return Response(status=404)
 
+# ================== 5. 启动 ==================
 if __name__ == '__main__':
-    init_db()
+    init_db()  # ⚠️ 确保数据库和表存在
+    # 启动前做一次抓取，避免 scheduler 首次触发报错
+    threading.Thread(target=scrape_all_sites, args=(True,)).start()
+
     scheduler = BackgroundScheduler()
     scheduler.add_job(scrape_all_sites, 'interval', minutes=10)
     scheduler.start()
-    serve(app, host='0.0.0.0', port=8080, threads=10)
 
+    serve(app, host='0.0.0.0', port=8080, threads=10)
