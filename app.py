@@ -2,7 +2,7 @@ import os
 import sqlite3
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -11,23 +11,7 @@ from bs4 import BeautifulSoup
 from apscheduler.schedulers.background import BackgroundScheduler
 from waitress import serve
 
-# ================== 1. 基础配置 ==================
-app = Flask(__name__)
-
-DB_PATH = "/app/data/xianbao.db"
-os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-
-PER_PAGE = 30
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36"
-}
-
-# 冷却控制
-COOLDOWN_SECONDS = 30
-last_scrape_time = 0
-scrape_lock = threading.Lock()
-
-# ================== 2. 站点与关键词 ==================
+# ================== 1. 配置中心 ==================
 SITES_CONFIG = {
     "xianbao": {
         "name": "线报库",
@@ -41,254 +25,243 @@ SITES_CONFIG = {
         "domain": "https://iehou.com",
         "list_url": "https://iehou.com/",
         "list_selector": "#body ul li",
-        "content_selector": ".thread-content.message, .thread-content, .message"
+        "content_selector": ".thread-content.message, .thread-content, .message.break-all, .message"
     }
 }
 
 BANK_KEYWORDS = {"农行": "农", "工行": "工", "建行": "建", "中行": "中"}
 KEYWORDS = list(BANK_KEYWORDS.values()) + [
-    "立减金", "红包", "话费", "京东", "支付宝", "微信", "流量", "充值", "zfb"
+    "立减金", "红包", "话费", "水", "毛", "招", "hang", "信", "移动",
+    "联通", "京东", "支付宝", "微信", "流量", "话费券", "充值",
+    "话费充值", "zfb"
 ]
 
-# ================== 3. Session ==================
+app = Flask(__name__)
+DATA_DIR = "/app/data"
+os.makedirs(DATA_DIR, exist_ok=True)
+DB_PATH = os.path.join(DATA_DIR, "xianbao.db")
+
+PER_PAGE = 30
+HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36"}
+
+# 冷却
+last_scrape_time = 0
+COOLDOWN_SECONDS = 30
+
 session = requests.Session()
 session.headers.update(HEADERS)
 adapter = HTTPAdapter(pool_connections=50, pool_maxsize=50, max_retries=2)
-session.mount("http://", adapter)
-session.mount("https://", adapter)
+session.mount('http://', adapter)
+session.mount('https://', adapter)
+scrape_lock = threading.Lock()
 
-# ================== 4. 数据库 ==================
-def get_db():
-    conn = sqlite3.connect(DB_PATH, timeout=10)
+# ================== 2. 数据库 ==================
+def get_db_connection():
+    conn = sqlite3.connect(DB_PATH, timeout=20, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
 
 def init_db():
-    conn = get_db()
-    conn.execute("PRAGMA journal_mode=WAL;")
+    conn = get_db_connection()
+    try:
+        conn.execute('PRAGMA journal_mode=WAL;')
+        conn.execute('''CREATE TABLE IF NOT EXISTS articles(
+            id INTEGER PRIMARY KEY AUTOINCREMENT, 
+            title TEXT, url TEXT UNIQUE, site_source TEXT,
+            match_keyword TEXT, original_time TEXT, 
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+        conn.execute('CREATE TABLE IF NOT EXISTS article_content(url TEXT PRIMARY KEY, content TEXT, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)')
+        conn.execute('CREATE TABLE IF NOT EXISTS scrape_log(id INTEGER PRIMARY KEY, last_scrape TIMESTAMP)')
+        conn.execute('''CREATE TABLE IF NOT EXISTS visit_stats(
+            ip TEXT PRIMARY KEY, 
+            visit_count INTEGER DEFAULT 1, 
+            last_visit TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+        conn.commit()
+        print("数据库初始化完成")
+    finally:
+        conn.close()
 
-    conn.execute("""
-    CREATE TABLE IF NOT EXISTS articles(
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        title TEXT,
-        url TEXT UNIQUE,
-        site_source TEXT,
-        match_keyword TEXT,
-        original_time TEXT,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-    """)
-
-    conn.execute("""
-    CREATE TABLE IF NOT EXISTS article_content(
-        url TEXT PRIMARY KEY,
-        content TEXT,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-    """)
-
-    conn.execute("""
-    CREATE TABLE IF NOT EXISTS scrape_log(
-        id INTEGER PRIMARY KEY,
-        last_scrape TEXT
-    )
-    """)
-
-    conn.execute("""
-    CREATE TABLE IF NOT EXISTS visit_stats(
-        ip TEXT PRIMARY KEY,
-        visit_count INTEGER DEFAULT 1,
-        last_visit TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-    """)
-
+def record_visit():
+    ip = request.headers.get('X-Forwarded-For', request.remote_addr)
+    conn = get_db_connection()
+    conn.execute('''
+        INSERT INTO visit_stats (ip, visit_count, last_visit) 
+        VALUES (?, 1, CURRENT_TIMESTAMP)
+        ON CONFLICT(ip) DO UPDATE SET 
+            visit_count = visit_count + 1,
+            last_visit = CURRENT_TIMESTAMP
+    ''', (ip,))
     conn.commit()
     conn.close()
 
-# ================== 5. 抓取逻辑 ==================
+# ================== 3. 抓取逻辑 ==================
 def scrape_all_sites(force=False):
-    global last_scrape_time
-
-    if scrape_lock.locked():
-        return
-
+    if scrape_lock.locked(): return
     with scrape_lock:
-        now = time.time()
-        if not force and now - last_scrape_time < COOLDOWN_SECONDS:
-            print("⏳ 冷却中，跳过抓取")
-            return
+        start_time = time.time()
+        now_str = (datetime.utcnow() + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
+        print(f"\n[{now_str}] >>> 正在执行抓取任务...")
 
-        last_scrape_time = now
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print(f"[{now_str}] 开始抓取")
-
-        conn = get_db()
+        conn = get_db_connection()
         total_new = 0
 
-        for site_key, cfg in SITES_CONFIG.items():
+        for site_key, config in SITES_CONFIG.items():
             try:
-                session.headers.update({"Referer": cfg["domain"]})
-                r = session.get(cfg["list_url"], timeout=10)
-                r.encoding = "utf-8"
-                soup = BeautifulSoup(r.text, "html.parser")
+                session.headers.update({"Referer": config['domain']})
+                resp = session.get(config['list_url'], timeout=10)
+                resp.encoding = 'utf-8'
+                soup = BeautifulSoup(resp.text, "html.parser")
 
-                rows = []
-                for item in soup.select(cfg["list_selector"]):
-                    a = item.find("a")
-                    if not a:
-                        continue
-
+                site_entries = []
+                for item in soup.select(config['list_selector']):
+                    a = item.select_one("a[href*='view'], a[href*='thread'], a[href*='post'], a[href*='.htm']") or item.find("a")
+                    if not a: continue
                     href = a.get("href")
-                    if not href:
-                        continue
-
-                    url = href if href.startswith("http") else cfg["domain"] + href
-                    if "haodan" in url:
-                        continue
+                    full_url = href if href.startswith("http") else (config['domain'] + (href if href.startswith("/") else "/" + href))
+                    if "new.xianbao.fun/haodan/" in full_url: continue
 
                     title = a.get_text(strip=True)
-                    kw = next((k for k in KEYWORDS if k.lower() in title.lower()), None)
-                    if not kw:
-                        continue
+                    match_kw = next((kw for kw in KEYWORDS if kw.lower() in title.lower()), None)
+                    if not match_kw: continue
 
-                    rows.append((
-                        title, url, site_key, kw,
-                        datetime.now().strftime("%H:%M")
-                    ))
+                    # 使用北京时间
+                    time_val = (datetime.utcnow() + timedelta(hours=8)).strftime("%H:%M")
+                    site_entries.append((title, full_url, site_key, match_kw, time_val))
 
-                if rows:
-                    cur = conn.cursor()
-                    cur.executemany("""
-                        INSERT OR IGNORE INTO articles
-                        (title, url, site_source, match_keyword, original_time)
-                        VALUES (?, ?, ?, ?, ?)
-                    """, rows)
-                    total_new += cur.rowcount
-
+                if site_entries:
+                    cursor = conn.cursor()
+                    cursor.executemany('INSERT OR IGNORE INTO articles (title, url, site_source, match_keyword, original_time) VALUES(?,?,?,?,?)', site_entries)
+                    site_new = cursor.rowcount
+                    total_new += site_new
+                    print(f"  [-] {config['name']}: 发现 {len(site_entries)} 条，新增 {site_new} 条")
             except Exception as e:
-                print(f"❌ {site_key} 抓取失败:", e)
+                print(f"  [!] {site_key} 抓取失败: {e}")
 
-        conn.execute(
-            "INSERT OR REPLACE INTO scrape_log(id,last_scrape) VALUES(1,?)",
-            (now_str,)
-        )
+        conn.execute('INSERT OR REPLACE INTO scrape_log(id,last_scrape) VALUES(1,?)', (now_str,))
         conn.commit()
+        user_count = conn.execute('SELECT COUNT(*) FROM visit_stats').fetchone()[0]
         conn.close()
+        duration = time.time() - start_time
+        print(f"[{now_str}] <<< 任务完成。新增: {total_new} 条 | 耗时: {duration:.2f}s | 独立访客: {user_count}\n")
 
-        print(f"[{now_str}] 抓取完成，新数据 {total_new}")
-
-# ================== 6. HTML 清洗 ==================
-def clean_html(html, site_key):
-    soup = BeautifulSoup(html, "html.parser")
+def clean_html(html_content, site_key):
+    if not html_content: return ""
+    soup = BeautifulSoup(html_content, "html.parser")
     for tag in soup.find_all(True):
-        if tag.name == "img":
-            src = tag.get("src", "")
-            if src.startswith("/"):
-                src = SITES_CONFIG[site_key]["domain"] + src
-            tag.attrs = {
-                "src": f"/img_proxy?url={src}",
-                "loading": "lazy",
-                "style": "max-width:100%;border-radius:8px"
-            }
-        else:
+        if tag.name != 'img': 
             tag.attrs = {}
+        else:
+            src = tag.get('src', '')
+            if src.startswith('/'): src = SITES_CONFIG[site_key]['domain'] + src
+            tag.attrs = {'src': f"/img_proxy?url={src}", 'loading': 'lazy', 'style': 'max-width:100%; height:auto; border-radius:8px;'}
     return str(soup)
 
-# ================== 7. 路由 ==================
-@app.route("/")
+# ================== 4. 路由 ==================
+@app.route('/')
 def index():
-    page = request.args.get("page", 1, type=int)
-    tag = request.args.get("tag")
+    record_visit()
+    tag = request.args.get('tag')
+    page = request.args.get('page', 1, type=int)
 
-    threading.Thread(target=scrape_all_sites).start()
+    global last_scrape_time
+    current_time = time.time()
+    if page == 1 and not tag:
+        if current_time - last_scrape_time > COOLDOWN_SECONDS:
+            last_scrape_time = current_time
+            threading.Thread(target=scrape_all_sites).start()
+        else:
+            print(f"  [Info] 冷却中，跳过抓取。")
 
-    conn = get_db()
-    where = ""
-    params = []
-
-    if tag:
-        where = "WHERE match_keyword=?"
-        params.append(tag)
-
-    total = conn.execute(f"SELECT COUNT(*) FROM articles {where}", params).fetchone()[0]
-    rows = conn.execute(
-        f"SELECT id,title,original_time FROM articles {where} ORDER BY id DESC LIMIT ? OFFSET ?",
-        params + [PER_PAGE, (page - 1) * PER_PAGE]
-    ).fetchall()
-
+    conn = get_db_connection()
+    where, params = ("", []) if not tag else ("WHERE match_keyword = ?", [tag.strip()])
+    total = conn.execute(f'SELECT COUNT(*) FROM articles {where}', params).fetchone()[0]
+    db_data = conn.execute(f'SELECT id, title, original_time FROM articles {where} ORDER BY id DESC LIMIT ? OFFSET ?', params + [PER_PAGE, (page-1)*PER_PAGE]).fetchall()
     conn.close()
 
-    articles = [
-        {"title": r["title"], "time": r["original_time"], "view": f"/view?id={r['id']}"}
-        for r in rows
-    ]
+    articles = [{"title": r['title'], "view_link": f"/view?id={r['id']}", "time": r['original_time']} for r in db_data]
+    tags = [{"name": "全部", "tag": None}] + [{"name": k, "tag": v} for k, v in BANK_KEYWORDS.items()] + [{"name": "红包", "tag": "红包"}]
 
     return render_template(
-        "index.html",
+        'index.html',
         articles=articles,
         current_page=page,
-        total_pages=(total + PER_PAGE - 1) // PER_PAGE,
+        total_pages=(total+PER_PAGE-1)//PER_PAGE,
         current_tag=tag,
-        bank_tag_list=BANK_KEYWORDS
+        bank_tag_list=tags
     )
 
-@app.route("/view")
+@app.route('/view')
 def view():
-    aid = request.args.get("id", type=int)
-    conn = get_db()
-
-    row = conn.execute(
-        "SELECT url,title,site_source FROM articles WHERE id=?",
-        (aid,)
-    ).fetchone()
-
+    article_id = request.args.get('id', type=int)
+    conn = get_db_connection()
+    row = conn.execute('SELECT url, title, site_source FROM articles WHERE id=?', (article_id,)).fetchone()
     if not row:
+        conn.close()
         return "文章不存在"
-
-    cached = conn.execute(
-        "SELECT content FROM article_content WHERE url=?",
-        (row["url"],)
-    ).fetchone()
-
-    if cached:
-        content = clean_html(cached["content"], row["site_source"])
-    else:
-        r = session.get(row["url"], timeout=10)
-        soup = BeautifulSoup(r.text, "html.parser")
-
-        raw = ""
-        for sel in SITES_CONFIG[row["site_source"]]["content_selector"].split(","):
-            node = soup.select_one(sel.strip())
-            if node:
-                raw = str(node)
-                break
-
-        if raw:
-            conn.execute(
-                "INSERT OR REPLACE INTO article_content(url,content) VALUES(?,?)",
-                (row["url"], raw)
-            )
-            conn.commit()
-            content = clean_html(raw, row["site_source"])
-        else:
-            content = "内容获取失败"
-
+    url, title, site_key = row['url'], row['title'], row['site_source']
+    cached = conn.execute('SELECT content FROM article_content WHERE url=?', (url,)).fetchone()
     conn.close()
-    return render_template("detail.html", title=row["title"], content=content)
 
-@app.route("/img_proxy")
+    if cached and len(cached['content']) > 50:
+        content = clean_html(cached['content'], site_key)
+    else:
+        try:
+            session.headers.update({"Referer": SITES_CONFIG[site_key]['domain']})
+            r = session.get(url, timeout=10)
+            r.encoding = 'utf-8'
+            soup = BeautifulSoup(r.text, 'html.parser')
+
+            raw_content = ""
+            if site_key == 'xianbao':
+                selectors = ["#mainbox article .article-content", "#art-fujia"]
+                parts = [str(soup.select_one(sel)) for sel in selectors if soup.select_one(sel)]
+                raw_content = "".join(parts)
+            else:
+                config = SITES_CONFIG.get(site_key)
+                for sel in [s.strip() for s in config['content_selector'].split(',')]:
+                    node = soup.select_one(sel)
+                    if node and len(node.get_text(strip=True)) > 10:
+                        raw_content = str(node)
+                        break
+            if raw_content:
+                conn = get_db_connection()
+                conn.execute('INSERT OR REPLACE INTO article_content(url, content) VALUES(?,?)', (url, raw_content))
+                conn.commit()
+                conn.close()
+                content = clean_html(raw_content, site_key)
+            else:
+                content = "内容抓取失败，请点击查看原文。"
+        except Exception as e:
+            content = f"加载异常: {e}"
+
+    return render_template('detail.html', content=content, title=title, original_url=url)
+
+@app.route('/logs')
+def show_logs():
+    conn = get_db_connection()
+    articles = conn.execute('SELECT title, match_keyword, updated_at FROM articles ORDER BY id DESC LIMIT 50').fetchall()
+    visitors = conn.execute('SELECT ip, visit_count, last_visit FROM visit_stats ORDER BY last_visit DESC LIMIT 30').fetchall()
+    total_art = conn.execute('SELECT COUNT(*) FROM articles').fetchone()[0]
+    total_vis = conn.execute('SELECT COUNT(*) FROM visit_stats').fetchone()[0]
+    last_s = conn.execute('SELECT last_scrape FROM scrape_log WHERE id=1').fetchone()
+    conn.close()
+    return render_template('logs.html', articles=articles, visitors=visitors, total_articles=total_art, total_visitors=total_vis, last_scrape=last_s['last_scrape'] if last_s else "暂无记录")
+
+@app.route('/img_proxy')
 def img_proxy():
-    url = request.args.get("url")
-    r = requests.get(url, headers=HEADERS, stream=True, timeout=10)
-    return Response(r.content, content_type=r.headers.get("Content-Type"))
+    url = request.args.get('url')
+    if not url: return Response(status=400)
+    try:
+        r = requests.get(url, headers=HEADERS, stream=True, timeout=10)
+        return Response(r.content, content_type=r.headers.get('Content-Type'))
+    except:
+        return Response(status=404)
 
-# ================== 8. 启动 ==================
-if __name__ == "__main__":
+# ================== 启动 ==================
+if __name__ == '__main__':
     init_db()
-
     scheduler = BackgroundScheduler()
-    scheduler.add_job(scrape_all_sites, "interval", minutes=10)
+    scheduler.add_job(scrape_all_sites, 'interval', minutes=10, kwargs={'force': True})
     scheduler.start()
-
-    print("🚀 Zeabur 启动成功")
-    serve(app, host="0.0.0.0", port=8080, threads=8)
+    print(">>> 监控助手已启动，端口: 8080")
+    serve(app, host='0.0.0.0', port=8080, threads=10)
