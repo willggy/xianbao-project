@@ -190,157 +190,102 @@ def upload_to_img_cdn(file_binary):
 # 3. 核心采集逻辑
 # ==========================================
 def scrape_all_sites():
-    # 如果已有线程在运行，直接跳过（防止重复运行）
+    # 1. 检查锁：如果已有爬虫在跑，直接退出
     if scrape_lock.locked(): return
     
     with scrape_lock:
         start_time = time.time()
-        conn = get_db_connection()
+        conn = None # 先初始化为 None
         
-        # ==========================================
-        # 1. 加载数据库规则
-        # ==========================================
-        rules = conn.execute("SELECT * FROM config_rules").fetchall()
-        
-        # 分类加载：标题白名单、标题黑名单、网址白名单、网址黑名单
-        title_white = [r['keyword'] for r in rules if r['rule_type']=='white' and r['match_scope']=='title']
-        title_black = [r['keyword'] for r in rules if r['rule_type']=='black' and r['match_scope']=='title']
-        url_white   = [r['keyword'] for r in rules if r['rule_type']=='white' and r['match_scope']=='url']
-        url_black   = [r['keyword'] for r in rules if r['rule_type']=='black' and r['match_scope']=='url']
-        
-        # 基础标题关键词库 (银行关键词 + 自定义标题白名单)
-        base_title_keywords = ALL_BANK_VALS + title_white
-        
-        # ==========================================
-        # 2. 批次去重集合
-        # ==========================================
-        # 用于在"本次"抓取任务中去重。如果线报库和爱猴发了同一个标题，只收录第一条。
-        # 这里不查数据库历史，只保证本次任务不重复。
-        current_batch_titles = set()
-        
-        site_stats = {}
-        now_beijing = datetime.utcnow() + timedelta(hours=8)
-        
-        # ==========================================
-        # 3. 循环抓取所有站点
-        # ==========================================
-        for site_key, config in SITES_CONFIG.items():
-            try:
-                # 发送网络请求
-                session_req.headers.update({"Referer": config['domain']})
-                resp = session_req.get(config['list_url'], timeout=15)
-                resp.encoding = 'utf-8'
-                soup = BeautifulSoup(resp.text, "html.parser")
-                
-                # 暂存符合条件的条目
-                entries = []
-                
-                for item in soup.select(config['list_selector']):
-                    # 提取链接和标题
-                    a = item.select_one("a[href*='view'], a[href*='thread'], a[href*='post'], a[href*='.htm']") or item.find("a")
-                    if not a: continue
+        try:
+            # 2. 建立数据库连接
+            conn = get_db_connection()
+            
+            # --- 加载规则 ---
+            rules = conn.execute("SELECT * FROM config_rules").fetchall()
+            title_white = [r['keyword'] for r in rules if r['rule_type']=='white' and r['match_scope']=='title']
+            title_black = [r['keyword'] for r in rules if r['rule_type']=='black' and r['match_scope']=='title']
+            url_white   = [r['keyword'] for r in rules if r['rule_type']=='white' and r['match_scope']=='url']
+            url_black   = [r['keyword'] for r in rules if r['rule_type']=='black' and r['match_scope']=='url']
+            
+            base_title_keywords = ALL_BANK_VALS + title_white
+            current_batch_titles = set()
+            site_stats = {}
+            now_beijing = datetime.utcnow() + timedelta(hours=8)
+            
+            # --- 循环抓取 ---
+            for site_key, config in SITES_CONFIG.items():
+                try:
+                    session_req.headers.update({"Referer": config['domain']})
+                    resp = session_req.get(config['list_url'], timeout=15)
+                    resp.encoding = 'utf-8'
+                    soup = BeautifulSoup(resp.text, "html.parser")
                     
-                    href = a.get("href", "")
-                    full_url = href if href.startswith("http") else (config['domain'] + (href if href.startswith("/") else "/" + href))
-                    title = a.get_text(strip=True)
-                    
-                    # ----------------------------------------
-                    # 核心筛选逻辑
-                    # ----------------------------------------
-                    
-                    # [A] 批次去重：如果本次任务已经收录过这个标题，跳过
-                    if title in current_batch_titles:
-                        continue
-                    # 防止单页面内重复（如置顶帖和普通列表重复）
-                    if any(e[0] == title for e in entries):
-                        continue
+                    entries = []
+                    for item in soup.select(config['list_selector']):
+                        a = item.select_one("a[href*='view'], a[href*='thread'], a[href*='post'], a[href*='.htm']") or item.find("a")
+                        if not a: continue
                         
-                    # [B] 黑名单过滤
-                    # 1. 网址黑名单 -> 屏蔽
-                    if any(bad in full_url for bad in url_black): continue
-                    # 2. 标题黑名单 -> 屏蔽
-                    if any(bad in title for bad in title_black): continue
+                        href = a.get("href", "")
+                        full_url = href if href.startswith("http") else (config['domain'] + (href if href.startswith("/") else "/" + href))
+                        title = a.get_text(strip=True)
+                        
+                        # 去重与筛选逻辑
+                        if title in current_batch_titles: continue
+                        if any(e[0] == title for e in entries): continue
+                        if any(bad in full_url for bad in url_black): continue
+                        if any(bad in title for bad in title_black): continue
+                        
+                        final_tag = None
+                        if any(good in full_url for good in url_white):
+                            final_tag = "特别关注"
+                        if not final_tag:
+                            matched_kw = next((kw for kw in base_title_keywords if kw.lower() in title.lower()), None)
+                            if matched_kw:
+                                final_tag = matched_kw
+                                for tag_name, val_list in BANK_KEYWORDS.items():
+                                    if matched_kw in val_list: final_tag = tag_name; break
+                        
+                        if not final_tag: continue
+                        
+                        entries.append((title, full_url, site_key, final_tag, now_beijing.strftime("%H:%M")))
+                        current_batch_titles.add(title)
                     
-                    final_tag = None
-                    
-                    # [C] 白名单匹配
-                    # 1. 网址白名单 -> 强制抓取 (优先级最高)
-                    if any(good in full_url for good in url_white):
-                        final_tag = "特别关注"
-                    
-                    # 2. 标题白名单/银行匹配
-                    if not final_tag:
-                        matched_kw = next((kw for kw in base_title_keywords if kw.lower() in title.lower()), None)
-                        if matched_kw:
-                            final_tag = matched_kw
-                            # 如果是银行关键词，归类到统一标签 (如 "农" -> "农行")
-                            for tag_name, val_list in BANK_KEYWORDS.items():
-                                if matched_kw in val_list:
-                                    final_tag = tag_name
-                                    break
-                    
-                    # 如果既没中网址白名单，也没中标题白名单，跳过
-                    if not final_tag: continue
-                    
-                    # ----------------------------------------
-                    # 加入待处理列表
-                    # ----------------------------------------
-                    entries.append((title, full_url, site_key, final_tag, now_beijing.strftime("%H:%M")))
-                    
-                    # 记录标题，防止后续站点重复
-                    current_batch_titles.add(title)
-                
-                # ==========================================
-                # 4. 数据库插入与精准统计 (修正日志虚高问题)
-                # ==========================================
-                if entries:
-                    actual_count = 0
-                    cursor = conn.cursor()
-                    
-                    # 逐条插入，统计真正的"新增"数量
-                    for entry in entries:
-                        try:
-                            # 尝试插入 (INSERT OR IGNORE 会自动忽略 URL 重复的数据)
-                            cursor.execute('INSERT OR IGNORE INTO articles (title, url, site_source, match_keyword, original_time) VALUES(?,?,?,?,?)', entry)
+                    # --- 数据库插入 (精准统计) ---
+                    if entries:
+                        actual_count = 0
+                        cursor = conn.cursor()
+                        for entry in entries:
+                            try:
+                                cursor.execute('INSERT OR IGNORE INTO articles (title, url, site_source, match_keyword, original_time) VALUES(?,?,?,?,?)', entry)
+                                if cursor.rowcount > 0:
+                                    actual_count += 1
+                            except: pass
+                        
+                        if actual_count > 0:
+                            site_stats[config['name']] = actual_count
                             
-                            # rowcount > 0 表示数据是新的，插入成功
-                            # rowcount == 0 表示数据库里已经有了，被忽略
-                            if cursor.rowcount > 0:
-                                actual_count += 1
-                        except Exception as e:
-                            print(f"DB插入异常: {e}")
-                    
-                    # 只有当真正有新数据入库时，才记录到 stats 字典
-                    if actual_count > 0:
-                        site_stats[config['name']] = actual_count
-                        
-            except Exception as e:
-                print(f"站点 {site_key} 抓取错误: {e}")
-        
-        # ==========================================
-        # 5. 生成日志并保存
-        # ==========================================
-        # 如果 site_stats 为空，说明本次全是重复旧数据，显示"无新内容"
-        stats_str = ", ".join([f"{k}+{v}" for k,v in site_stats.items()]) if site_stats else "无新内容"
-        log_msg = f"[{now_beijing.strftime('%Y-%m-%d %H:%M:%S')}] 任务完成: {stats_str}"
-        print(log_msg)
-        
-        conn.execute('INSERT INTO scrape_log(last_scrape) VALUES(?)', (log_msg,))
-        # 只保留最近50条日志
-        conn.execute('DELETE FROM scrape_log WHERE id NOT IN (SELECT id FROM scrape_log ORDER BY id DESC LIMIT 50)')
-        
-        conn.commit()
-        conn.close()
-        
-        # 日志记录
-        stats_str = ", ".join([f"{k}+{v}" for k,v in site_stats.items()]) if site_stats else "无新内容"
-        log_msg = f"[{now_beijing.strftime('%Y-%m-%d %H:%M:%S')}] 任务完成: {stats_str}"
-        print(log_msg)
-        
-        conn.execute('INSERT INTO scrape_log(last_scrape) VALUES(?)', (log_msg,))
-        conn.execute('DELETE FROM scrape_log WHERE id NOT IN (SELECT id FROM scrape_log ORDER BY id DESC LIMIT 50)')
-        conn.commit()
-        conn.close()
+                except Exception as e:
+                    print(f"站点 {site_key} 抓取错误: {e}")
+
+            # --- 记录日志 ---
+            # 只有数据库还是打开状态时，才写入日志
+            stats_str = ", ".join([f"{k}+{v}" for k,v in site_stats.items()]) if site_stats else "无新内容"
+            log_msg = f"[{now_beijing.strftime('%Y-%m-%d %H:%M:%S')}] 任务完成: {stats_str}"
+            print(log_msg)
+            
+            # 写入日志表
+            conn.execute('INSERT INTO scrape_log(last_scrape) VALUES(?)', (log_msg,))
+            conn.execute('DELETE FROM scrape_log WHERE id NOT IN (SELECT id FROM scrape_log ORDER BY id DESC LIMIT 50)')
+            conn.commit()
+
+        except Exception as e:
+            print(f"全局抓取异常: {e}")
+            
+        finally:
+            # 3. 最后关闭连接 (无论中间是否报错，都会执行这里)
+            if conn:
+                conn.close()
 
 # ==========================================
 # 4. Web 路由
@@ -618,4 +563,5 @@ if __name__ == '__main__':
     # max_request_body_size 设置为 100MB，解决 Request Entity Too Large
 
     serve(app, host='0.0.0.0', port=8080, threads=10, max_request_body_size=104857600)
+
 
