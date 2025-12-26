@@ -59,7 +59,7 @@ ALL_BANK_VALS = [word for words in BANK_KEYWORDS.values() for word in words]
 
 # --- 路径配置 (适配 Zeabur/Docker) ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.path.join(BASE_DIR, "data")
+DATA_DIR = os.path.join(BASE_DIR, "/app/data")
 if not os.path.exists(DATA_DIR): 
     os.makedirs(DATA_DIR)
 DB_PATH = os.path.join(DATA_DIR, "xianbao.db")
@@ -130,7 +130,7 @@ def get_db_connection():
     # --- 初始化默认规则 ---
     cursor = conn.cursor()
     if cursor.execute("SELECT COUNT(*) FROM config_rules").fetchone()[0] == 0:
-        defaults = ["立减金", "红包", "话费", "水", "毛", "招", "hang", "信", "移动", "联通", "京东", "支付宝", "微信", "流量", "话费券", "充值", "zfb"]
+        defaults = ["立减金", "红包", "话费", "大水", "小水", "有水", "毛", "招", "hang", "信", "移动", "联通",  "支付宝", "微信", "流量", "话费券", "充值", "zfb"]
         # 默认只添加标题白名单
         cursor.executemany("INSERT OR IGNORE INTO config_rules (rule_type, keyword, match_scope) VALUES (?, ?, ?)", 
                            [('white', w, 'title') for w in defaults])
@@ -560,4 +560,5 @@ if __name__ == '__main__':
     
     print("Waitress 服务器启动中: http://0.0.0.0:8080")
     # max_request_body_size 设置为 100MB，解决 Request Entity Too Large
+
     serve(app, host='0.0.0.0', port=8080, threads=10, max_request_body_size=104857600)
