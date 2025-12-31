@@ -26,95 +26,74 @@
         .app-header {
             position: sticky;
             top: 0;
-            z-index: 1050;
+            z-index: 9999 !important; 
             background: var(--header-bg);
             backdrop-filter: blur(20px);
             -webkit-backdrop-filter: blur(20px);
-            border-bottom: 0.5px solid rgba(0,0,0,0.1);
-            padding: 12px 16px;
+            border-bottom: 1px solid rgba(0,0,0,0.1);
         }
 
-        .header-content {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            max-width: 600px;
-            margin: 0 auto;
-        }
-
-        .site-title {
-            font-size: 20px;
+        .title-bar {
+            padding: 12px 15px 5px 15px;
             font-weight: 700;
-            color: var(--text-main);
-            letter-spacing: -0.5px;
+            font-size: 1.2rem;
+            color: #000;
         }
 
-        /* 快捷搜索栏 */
-        .search-bar {
-            max-width: 600px;
-            margin: 12px auto;
-            padding: 0 16px;
-        }
-        .search-input-group {
-            background: #fff;
-            border-radius: 10px;
-            padding: 4px 12px;
+        /* 导航容器：不设 overflow 以免截断下拉菜单 */
+        .nav-wrapper {
+            padding: 8px 15px 12px 15px;
             display: flex;
             align-items: center;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.04);
-        }
-        .search-input-group input {
-            border: none;
-            outline: none;
-            width: 100%;
-            padding: 6px;
-            font-size: 15px;
+            gap: 10px;
         }
 
-        /* 标签栏 */
-        .tag-scroll {
-            display: flex;
-            overflow-x: auto;
-            padding: 4px 16px 12px;
-            gap: 8px;
-            -webkit-overflow-scrolling: touch;
-        }
-        .tag-scroll::-webkit-scrollbar { display: none; }
-        
-        .tag-pill {
-            white-space: nowrap;
+        .nav-pill {
+            display: inline-block;
             padding: 6px 14px;
             border-radius: 18px;
-            background: #fff;
-            color: var(--text-main);
             font-size: 13px;
+            font-weight: 500;
             text-decoration: none;
-            border: 0.5px solid rgba(0,0,0,0.08);
-            transition: all 0.2s;
+            color: var(--text-main);
+            background: rgba(0,0,0,0.05);
+            border: none;
+            white-space: nowrap;
         }
-        .tag-pill.active {
-            background: var(--text-main);
-            color: #fff;
-            border-color: var(--text-main);
+        
+        .nav-pill.active {
+            background: var(--ios-blue);
+            color: white !important;
         }
 
-        /* 列表容器 */
+        /* 下拉菜单绝对定位修复 */
+        .dropdown-menu {
+            position: absolute !important;
+            z-index: 10000 !important;
+            border-radius: 12px;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.15);
+            border: 1px solid rgba(0,0,0,0.05);
+            margin-top: 5px !important;
+        }
+
+        /* 搜索折叠栏 */
+        #searchCollapse {
+            background: #fff;
+            border-bottom: 1px solid #eee;
+            padding: 10px 15px;
+        }
+
+        /* 列表区域层级降低 */
         .list-container {
-            max-width: 600px;
+            max-width: 800px;
             margin: 0 auto;
             background: #fff;
-            border-radius: 14px;
-            margin-top: 8px;
-            overflow: hidden;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.02);
+            position: relative;
+            z-index: 1; 
         }
-
-        .section-title {
-            font-size: 13px;
-            color: var(--text-sub);
-            padding: 16px 16px 8px;
-            text-transform: uppercase;
-            font-weight: 600;
+        
+        @media (min-width: 768px) {
+            .list-container { margin-top: 20px; border-radius: 12px; overflow: hidden; }
         }
 
         .list-item {
@@ -122,77 +101,57 @@
             justify-content: space-between;
             align-items: center;
             padding: 14px 16px;
-            text-decoration: none;
-            color: var(--text-main);
-            border-bottom: 0.5px solid rgba(0,0,0,0.05);
-            transition: background 0.2s;
+            border-bottom: 1px solid #efefef;
+            text-decoration: none !important;
+            color: inherit !important;
         }
-        .list-item:active { background-color: #f2f2f7; }
-        .list-item:last-child { border-bottom: none; }
+        
+        .list-item:active { background-color: #e5e5e5; }
 
-        .item-title {
-            font-size: 16px;
-            line-height: 1.4;
-            flex: 1;
-            padding-right: 12px;
-            display: -webkit-box;
-            -webkit-line-clamp: 2;
-            -webkit-box-orient: vertical;
-            overflow: hidden;
-        }
-
-        .item-time {
-            font-size: 13px;
-            color: var(--text-sub);
-            white-space: nowrap;
-        }
-
-        .badge-top {
-            background: #ff3b30;
-            color: #fff;
-            font-size: 10px;
-            padding: 2px 6px;
-            border-radius: 4px;
-            margin-right: 6px;
-            vertical-align: middle;
-        }
-
-        /* 按钮与导航 */
-        .admin-btn {
-            color: var(--ios-blue);
-            text-decoration: none;
-            font-size: 15px;
-        }
+        .item-title { font-size: 15px; line-height: 1.5; color: #000; flex-grow: 1; margin-right: 15px; }
+        .badge-top { background-color: #ff3b30; color: white; font-size: 10px; padding: 1px 4px; border-radius: 4px; margin-right: 5px; font-weight: bold; }
+        .item-time { font-size: 12px; color: var(--text-sub); font-family: monospace; }
     </style>
 </head>
 <body>
 
     <header class="app-header">
-        <div class="header-content">
-            <div class="site-title">{{ site_title }}</div>
-            <a href="/admin" class="admin-btn">管理</a>
+        <div class="container" style="max-width: 800px; margin: 0 auto; padding: 0;">
+            <div class="title-bar">
+                <i class="bi bi-activity" style="color: var(--ios-blue);"></i> 古希腊掌管羊毛的神
+            </div>
+            
+            <nav class="nav-wrapper">
+                <a href="/" class="nav-pill {{ 'active' if not current_tag else '' }}">全部</a>
+                
+                <div class="dropdown">
+                    <button class="nav-pill dropdown-toggle {{ 'active' if current_tag in bank_list else '' }}" type="button" data-bs-toggle="dropdown" aria-expanded="false">
+                        银行活动
+                    </button>
+                    <ul class="dropdown-menu">
+                        {% for bank in bank_list %}
+                        <li><a class="dropdown-item" href="/?tag={{ bank }}">{{ bank }}</a></li>
+                        {% endfor %}
+                    </ul>
+                </div>
+
+                <a href="/?tag=羊毛精选" class="nav-pill {{ 'active' if current_tag == '羊毛精选' else '' }}">羊毛精选</a>
+
+                <button class="nav-pill" type="button" data-bs-toggle="collapse" data-bs-target="#searchCollapse">
+                    <i class="bi bi-search"></i>
+                </button>
+            </nav>
+        </div>
+
+        <div class="collapse" id="searchCollapse">
+            <div class="container" style="max-width: 800px; margin: 0 auto;">
+                <form action="/" method="get" class="d-flex gap-2">
+                    <input type="text" name="q" class="form-control form-control-sm" placeholder="搜索关键词..." value="{{ q or '' }}" style="border-radius: 8px;">
+                    <button type="submit" class="btn btn-primary btn-sm" style="border-radius: 8px; white-space: nowrap;">搜索</button>
+                </form>
+            </div>
         </div>
     </header>
-
-    <div class="search-bar">
-        <form action="/" method="get">
-            <div class="search-input-group">
-                <i class="bi bi-search text-muted"></i>
-                <input type="text" name="q" placeholder="搜索关键词..." value="{{ q or '' }}">
-                {% if q %}
-                <a href="/" class="text-muted"><i class="bi bi-x-circle-fill"></i></a>
-                {% endif %}
-            </div>
-        </form>
-    </div>
-
-    <div class="tag-scroll">
-        <a href="/" class="tag-pill {{ 'active' if not current_tag else '' }}">全部</a>
-        {% for bank in bank_list %}
-        <a href="/?tag={{ bank }}" class="tag-pill {{ 'active' if current_tag == bank else '' }}">{{ bank }}</a>
-        {% endfor %}
-    </div>
-
     <div class="list-container">
         <div style="font-size: 11px; color: #999; padding: 12px 16px 0; display: flex; align-items: center; gap: 4px;">
             <i class="bi bi-clock-history"></i> 
@@ -228,3 +187,4 @@
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 </body>
 </html>
+
