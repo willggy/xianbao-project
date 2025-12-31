@@ -74,10 +74,20 @@ session_http.mount('https://', adapter)
 scrape_lock = threading.Lock()
 
 # ==========================================
-# 2. 数据库与并发优化
+# 2. 核心辅助工具 (修复 NameError)
 # ==========================================
+
+# 登录验证装饰器
+def login_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if not session.get('is_logged_in'):
+            return redirect(url_for('login', next=request.url))
+        return f(*args, **kwargs)
+    return decorated_function
+
+# 数据库连接与并发优化
 def get_db_connection():
-    # 优化1：增加 timeout 处理并发锁，开启 WAL 模式实现读写分离
     conn = sqlite3.connect(DB_PATH, timeout=60)
     conn.row_factory = sqlite3.Row
     conn.execute('PRAGMA journal_mode=WAL;')
@@ -94,8 +104,8 @@ def get_db_connection():
     conn.commit()
     return conn
 
+# 记录访问 (过滤 Zeabur 监控)
 def record_visit():
-    # 优化2：Zeabur 访问不计次数 (过滤健康检查)
     ua = request.headers.get('User-Agent', '')
     if 'HealthCheck' in ua or 'Zeabur' in ua:
         return
@@ -109,6 +119,32 @@ def record_visit():
         conn.close()
     except: pass
 
+# HTML 清洗
+def clean_html(html_content, site_key):
+    if not html_content: return ""
+    soup = BeautifulSoup(html_content, "html.parser")
+    for tag in soup.find_all(True):
+        if tag.name == 'img':
+            src = tag.get('src', '')
+            if src.startswith('/'): src = SITES_CONFIG[site_key]['domain'] + src
+            tag.attrs = {'src': f"/img_proxy?url={src}", 'loading': 'lazy', 'style': 'max-width:100%; border-radius:8px;'}
+        elif tag.name == 'a':
+            tag.attrs = {'href': tag.get('href'), 'target': '_blank'}
+    return str(soup)
+
+# 上传图片到图床
+def upload_to_img_cdn(file_binary):
+    try:
+        url = 'https://img.scdn.io/api/v1.php'
+        files = {'image': ('upload.jpg', file_binary)}
+        res = requests.post(url, files=files, data={'cdn_domain': 'img.scdn.io'}, timeout=30)
+        if res.status_code == 200:
+            js = res.json()
+            if 'url' in js: return js['url']
+            if 'data' in js and isinstance(js['data'], dict): return js['data'].get('url')
+    except: pass
+    return None
+
 # ==========================================
 # 3. 核心抓取与 4天自动清理
 # ==========================================
@@ -117,8 +153,6 @@ def scrape_all_sites():
     with scrape_lock:
         start_time = time.time()
         now_beijing = datetime.utcnow() + timedelta(hours=8)
-        now_str = now_beijing.strftime("%Y-%m-%d %H:%M:%S")
-        
         conn = get_db_connection()
         site_stats = {}
 
@@ -130,7 +164,7 @@ def scrape_all_sites():
                 
                 new_count = 0
                 for item in soup.select(config['list_selector']):
-                    a = item.select_one("a[href*='view'], a[href*='thread'], a[href*='post'], a[href*='.htm']") or item.find("a")
+                    a = item.select_one("a[href*='view'], a[href*='thread'], a[href*='post']") or item.find("a")
                     if not a: continue
                     
                     href = a.get("href", "")
@@ -142,42 +176,42 @@ def scrape_all_sites():
                     
                     final_tag = matched_kw
                     for tag_name, val_list in BANK_KEYWORDS.items():
-                        if matched_kw in val_list:
-                            final_tag = tag_name; break
+                        if matched_kw in val_list: final_tag = tag_name; break
                     
-                    time_val = now_beijing.strftime("%H:%M")
                     try:
                         conn.execute('INSERT OR IGNORE INTO articles (title, url, site_source, match_keyword, original_time) VALUES(?,?,?,?,?)',
-                                     (title, full_url, site_key, final_tag, time_val))
+                                     (title, full_url, site_key, final_tag, now_beijing.strftime("%H:%M")))
                         if conn.total_changes > 0: new_count += 1
                     except: pass
                 site_stats[config['name']] = new_count
-            except Exception as e:
-                print(f"抓取 {site_key} 报错: {e}")
+            except: pass
 
-        # 优化3：4天自动清理机制 (自己发布的 user 不删除)
+        # 4天自动清理 (保护 user)
         conn.execute("DELETE FROM articles WHERE site_source != 'user' AND updated_at < datetime('now', '-4 days')")
         conn.execute("DELETE FROM article_content WHERE url NOT IN (SELECT url FROM articles)")
         conn.execute("DELETE FROM scrape_log WHERE id NOT IN (SELECT id FROM scrape_log ORDER BY id DESC LIMIT 50)")
         
-        duration = time.time() - start_time
-        log_msg = f"[{now_str}] 任务完成: {site_stats} (耗时 {duration:.1f}s)"
-        print(log_msg)
+        log_msg = f"[{now_beijing.strftime('%Y-%m-%d %H:%M:%S')}] 任务完成: {site_stats}"
         conn.execute('INSERT INTO scrape_log(last_scrape) VALUES(?)', (log_msg,))
         conn.commit()
         conn.close()
 
 # ==========================================
-# 4. 路由逻辑 (去掉首页阻塞)
+# 4. 路由逻辑
 # ==========================================
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        if request.form.get('password') == ADMIN_PASSWORD:
+            session['is_logged_in'] = True
+            return redirect(url_for('admin_panel'))
+    return render_template('login.html')
+
 @app.route('/')
 def index():
     record_visit()
-    tag = request.args.get('tag')
-    q = request.args.get('q')
-    page = request.args.get('page', 1, type=int)
-
-    # 优化4：彻底去掉首页阻塞抓取逻辑，实现秒开页面
+    tag, q, page = request.args.get('tag'), request.args.get('q'), request.args.get('page', 1, type=int)
     conn = get_db_connection()
     where = "WHERE 1=1"
     params = []
@@ -188,59 +222,36 @@ def index():
                             params + [PER_PAGE, (page-1)*PER_PAGE]).fetchall()
     total = conn.execute(f'SELECT COUNT(*) FROM articles {where}', params).fetchone()[0]
     conn.close()
-    
-    return render_template('index.html', articles=articles, site_title=SITE_TITLE, 
-                           bank_list=list(BANK_KEYWORDS.keys()), current_tag=tag, 
-                           q=q, current_page=page, total_pages=(total+PER_PAGE-1)//PER_PAGE)
+    return render_template('index.html', articles=articles, site_title=SITE_TITLE, bank_list=list(BANK_KEYWORDS.keys()), 
+                           current_tag=tag, q=q, current_page=page, total_pages=(total+PER_PAGE-1)//PER_PAGE)
 
-# --- 文章详情 ---
 @app.route("/view")
 def view():
     article_id = request.args.get("id", type=int)
     conn = get_db_connection()
     row = conn.execute("SELECT * FROM articles WHERE id=?", (article_id,)).fetchone()
-    
-    if not row: 
-        conn.close()
-        return "内容不存在", 404
+    if not row: return "内容不存在", 404
     
     url, site_key, title = row["url"], row["site_source"], row["title"]
-    
-    # 尝试读缓存
     cached = conn.execute("SELECT content FROM article_content WHERE url=?", (url,)).fetchone()
     content = ""
-    
+
     if cached and cached['content']:
-        # 用户发布的直接显示，采集的经过清洗
         content = cached["content"] if site_key == "user" else clean_html(cached["content"], site_key)
     elif site_key in SITES_CONFIG:
-        # 缓存无数据，实时抓取
         try:
-            r = session_req.get(url, timeout=10)
-            r.encoding = 'utf-8'
+            r = session_http.get(url, timeout=10)
             soup = BeautifulSoup(r.text, "html.parser")
-            selectors = SITES_CONFIG[site_key]["content_selector"].split(',')
-            node = None
-            for sel in selectors:
-                node = soup.select_one(sel.strip())
-                if node: break
-            
+            node = soup.select_one(SITES_CONFIG[site_key]["content_selector"].split(',')[0])
             if node:
-                content_raw = str(node)
-                conn.execute("INSERT OR REPLACE INTO article_content(url, content) VALUES(?,?)", (url, content_raw))
+                conn.execute("INSERT OR REPLACE INTO article_content(url, content) VALUES(?,?)", (url, str(node)))
                 conn.commit()
-                content = clean_html(content_raw, site_key)
-            else:
-                content = f"<div class='alert alert-warning'>正文提取失败，<a href='{url}' target='_blank'>点击访问原文</a></div>"
-        except Exception as e:
-            content = f"加载失败: {e}"
-    else:
-        content = f"无法加载内容，<a href='{url}' target='_blank'>点击访问原文</a>"
-        
+                content = clean_html(str(node), site_key)
+        except: content = "加载原文失败"
+    
     conn.close()
     return render_template("detail.html", title=title, content=content, original_url=url, time=row['original_time'])
 
-# --- 🔒 发布新文章 ---
 @app.route('/publish', methods=['GET', 'POST'])
 @login_required
 def publish():
@@ -248,117 +259,31 @@ def publish():
         title = request.form.get('title')
         raw_content = request.form.get('content')
         is_top = 1 if request.form.get('publish_mode') == 'top' else 0
-        
-        # 只处理 Base64 图片上传
         def img_replacer(match):
-            try:
-                cdn = upload_to_img_cdn(base64.b64decode(match.group(2)))
-                return f'src="{cdn}"' if cdn else match.group(0)
-            except: return match.group(0)
-        
+            cdn = upload_to_img_cdn(base64.b64decode(match.group(2)))
+            return f'src="{cdn}"' if cdn else match.group(0)
         processed = re.sub(r'src="data:image\/(.*?);base64,(.*?)"', img_replacer, raw_content)
         fake_url = f"user://{int(time.time())}"
-        
         conn = get_db_connection()
         conn.execute("INSERT INTO articles (title, url, site_source, match_keyword, original_time, is_top) VALUES (?,?,?,?,?,?)",
                      (title, fake_url, "user", "羊毛精选", "刚刚", is_top))
         conn.execute("INSERT INTO article_content (url, content) VALUES (?,?)", (fake_url, processed))
-        conn.commit()
-        conn.close()
+        conn.commit(); conn.close()
         return redirect('/')
     return render_template('publish.html')
 
-# --- 🔒 后台管理面板 ---
 @app.route('/admin')
 @login_required
 def admin_panel():
     conn = get_db_connection()
-    
-    # 1. 获取规则
-    whitelist = conn.execute("SELECT * FROM config_rules WHERE rule_type='white' ORDER BY id DESC").fetchall()
-    blacklist = conn.execute("SELECT * FROM config_rules WHERE rule_type='black' ORDER BY id DESC").fetchall()
-    
-    # 2. 获取文章列表
     my_articles = conn.execute("SELECT * FROM articles WHERE site_source='user' ORDER BY id DESC").fetchall()
-    
-    # 3. 获取统计数据 (新增)
-    total_articles = conn.execute("SELECT COUNT(*) FROM articles").fetchone()[0]
-    total_visits = conn.execute("SELECT SUM(visit_count) FROM visit_stats").fetchone()[0] or 0
-    
-    # 获取最后抓取日志
-    last_log = conn.execute("SELECT last_scrape FROM scrape_log ORDER BY id DESC LIMIT 1").fetchone()
-    last_scrape_time = last_log[0].split(']')[0].replace('[', '') if last_log else "暂无记录"
-
+    stats = {
+        'total': conn.execute("SELECT COUNT(*) FROM articles").fetchone()[0],
+        'visits': conn.execute("SELECT SUM(visit_count) FROM visit_stats").fetchone()[0] or 0
+    }
     conn.close()
-    
-    return render_template('admin.html', 
-                           whitelist=whitelist, 
-                           blacklist=blacklist, 
-                           my_articles=my_articles,
-                           stats={
-                               'total_articles': total_articles,
-                               'total_visits': total_visits,
-                               'last_update': last_scrape_time
-                           })
+    return render_template('admin.html', my_articles=my_articles, stats=stats)
 
-# --- 🔒 规则管理 API ---
-@app.route('/api/rule', methods=['POST'])
-@login_required
-def api_rule():
-    action = request.form.get('action')
-    rtype = request.form.get('type')  # white/black
-    scope = request.form.get('scope') # title/url
-    kw = request.form.get('keyword', '').strip()
-    rid = request.form.get('id')
-    
-    conn = get_db_connection()
-    if action == 'add' and kw:
-        try: 
-            conn.execute("INSERT INTO config_rules (rule_type, keyword, match_scope) VALUES (?, ?, ?)", (rtype, kw, scope))
-        except: pass
-    elif action == 'delete' and rid:
-        conn.execute("DELETE FROM config_rules WHERE id=?", (rid,))
-    conn.commit()
-    conn.close()
-    return redirect('/admin')
-
-# --- 🔒 编辑文章 ---
-@app.route('/article/edit/<int:aid>', methods=['GET', 'POST'])
-@login_required
-def edit_article(aid):
-    conn = get_db_connection()
-    
-    if request.method == 'POST':
-        title = request.form.get('title')
-        raw_content = request.form.get('content')
-        is_top = 1 if request.form.get('publish_mode') == 'top' else 0
-        
-        # 只上传新粘贴的 Base64 图片
-        def img_replacer(match):
-            try:
-                cdn = upload_to_img_cdn(base64.b64decode(match.group(2)))
-                return f'src="{cdn}"' if cdn else match.group(0)
-            except: return match.group(0)
-            
-        processed = re.sub(r'src="data:image\/(.*?);base64,(.*?)"', img_replacer, raw_content)
-        
-        row = conn.execute("SELECT url FROM articles WHERE id=?", (aid,)).fetchone()
-        if row:
-            conn.execute("UPDATE articles SET title=?, is_top=? WHERE id=?", (title, is_top, aid))
-            conn.execute("UPDATE article_content SET content=? WHERE url=?", (processed, row['url']))
-            conn.commit()
-        
-        conn.close()
-        return redirect('/admin')
-
-    article = conn.execute("SELECT * FROM articles WHERE id=? AND site_source='user'", (aid,)).fetchone()
-    if not article: return "未找到文章", 404
-    
-    content = conn.execute("SELECT content FROM article_content WHERE url=?", (article['url'],)).fetchone()['content']
-    conn.close()
-    return render_template('edit.html', article=article, content=content)
-
-# --- 🔒 删除文章 ---
 @app.route('/article/delete/<int:aid>')
 @login_required
 def delete_article(aid):
@@ -371,7 +296,6 @@ def delete_article(aid):
     conn.close()
     return redirect('/admin')
 
-# --- 🔒 系统日志 ---
 @app.route('/logs')
 @login_required
 def show_logs():
@@ -381,30 +305,26 @@ def show_logs():
     conn.close()
     return render_template('logs.html', logs=logs, visitors=visitors)
 
-# --- 图片代理 (防盗链) ---
 @app.route('/img_proxy')
 def img_proxy():
     url = request.args.get('url')
-    if not url: return "", 404
     try:
         r = requests.get(url, headers=HEADERS, stream=True, timeout=10)
         return Response(r.content, content_type=r.headers.get('Content-Type'))
     except: return Response(status=404)
 
+@app.route('/logout')
+def logout():
+    session.pop('is_logged_in', None)
+    return redirect(url_for('index'))
+
 # ==========================================
-# 5. 启动入口 (5分钟刷新)
+# 5. 启动入口
 # ==========================================
 if __name__ == '__main__':
     get_db_connection().close()
-    
     scheduler = BackgroundScheduler()
-    # 优化5：改成5分钟刷一次
     scheduler.add_job(scrape_all_sites, 'interval', minutes=5)
     scheduler.start()
-    
-    # 启动时后台抓取一次
     threading.Thread(target=scrape_all_sites).start()
-    
-    print(f"{SITE_TITLE} 启动成功，端口: 8080")
     serve(app, host='0.0.0.0', port=8080, threads=10, max_request_body_size=104857600)
-
