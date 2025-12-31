@@ -289,8 +289,148 @@ def login():
 @app.route('/logout')
 def logout():
     session.clear(); return redirect('/')
+# --- 文章详情 ---
+@app.route("/view")
+def view():
+    article_id = request.args.get("id", type=int)
+    conn = get_db_connection()
+    row = conn.execute("SELECT * FROM articles WHERE id=?", (article_id,)).fetchone()
+    
+    if not row: 
+        conn.close()
+        return "内容不存在", 404
+    
+    url, site_key, title = row["url"], row["site_source"], row["title"]
+    
+    # 尝试读缓存
+    cached = conn.execute("SELECT content FROM article_content WHERE url=?", (url,)).fetchone()
+    content = ""
+    
+    if cached and cached['content']:
+        # 用户发布的直接显示，采集的经过清洗
+        content = cached["content"] if site_key == "user" else clean_html(cached["content"], site_key)
+    elif site_key in SITES_CONFIG:
+        # 缓存无数据，实时抓取
+        try:
+            r = session_req.get(url, timeout=10)
+            r.encoding = 'utf-8'
+            soup = BeautifulSoup(r.text, "html.parser")
+            selectors = SITES_CONFIG[site_key]["content_selector"].split(',')
+            node = None
+            for sel in selectors:
+                node = soup.select_one(sel.strip())
+                if node: break
+            
+            if node:
+                content_raw = str(node)
+                conn.execute("INSERT OR REPLACE INTO article_content(url, content) VALUES(?,?)", (url, content_raw))
+                conn.commit()
+                content = clean_html(content_raw, site_key)
+            else:
+                content = f"<div class='alert alert-warning'>正文提取失败，<a href='{url}' target='_blank'>点击访问原文</a></div>"
+        except Exception as e:
+            content = f"加载失败: {e}"
+    else:
+        content = f"无法加载内容，<a href='{url}' target='_blank'>点击访问原文</a>"
+        
+    conn.close()
+    return render_template("detail.html", title=title, content=content, original_url=url, time=row['original_time'])
 
-# (此处建议保留 app (1).py 或 app (2).py 中的 /view, /publish, /img_proxy 等功能路由代码)
+# --- 🔒 发布新文章 ---
+@app.route('/publish', methods=['GET', 'POST'])
+@login_required
+def publish():
+    if request.method == 'POST':
+        title = request.form.get('title')
+        raw_content = request.form.get('content')
+        is_top = 1 if request.form.get('publish_mode') == 'top' else 0
+        
+        # 只处理 Base64 图片上传
+        def img_replacer(match):
+            try:
+                cdn = upload_to_img_cdn(base64.b64decode(match.group(2)))
+                return f'src="{cdn}"' if cdn else match.group(0)
+            except: return match.group(0)
+        
+        processed = re.sub(r'src="data:image\/(.*?);base64,(.*?)"', img_replacer, raw_content)
+        fake_url = f"user://{int(time.time())}"
+        
+        conn = get_db_connection()
+        conn.execute("INSERT INTO articles (title, url, site_source, match_keyword, original_time, is_top) VALUES (?,?,?,?,?,?)",
+                     (title, fake_url, "user", "羊毛精选", "刚刚", is_top))
+        conn.execute("INSERT INTO article_content (url, content) VALUES (?,?)", (fake_url, processed))
+        conn.commit()
+        conn.close()
+        return redirect('/')
+    return render_template('publish.html')
+# --- 🔒 编辑文章 ---
+@app.route('/article/edit/<int:aid>', methods=['GET', 'POST'])
+@login_required
+def edit_article(aid):
+    conn = get_db_connection()
+    
+    if request.method == 'POST':
+        title = request.form.get('title')
+        raw_content = request.form.get('content')
+        is_top = 1 if request.form.get('publish_mode') == 'top' else 0
+        
+        # 只上传新粘贴的 Base64 图片
+        def img_replacer(match):
+            try:
+                cdn = upload_to_img_cdn(base64.b64decode(match.group(2)))
+                return f'src="{cdn}"' if cdn else match.group(0)
+            except: return match.group(0)
+            
+        processed = re.sub(r'src="data:image\/(.*?);base64,(.*?)"', img_replacer, raw_content)
+        
+        row = conn.execute("SELECT url FROM articles WHERE id=?", (aid,)).fetchone()
+        if row:
+            conn.execute("UPDATE articles SET title=?, is_top=? WHERE id=?", (title, is_top, aid))
+            conn.execute("UPDATE article_content SET content=? WHERE url=?", (processed, row['url']))
+            conn.commit()
+        
+        conn.close()
+        return redirect('/admin')
+
+    article = conn.execute("SELECT * FROM articles WHERE id=? AND site_source='user'", (aid,)).fetchone()
+    if not article: return "未找到文章", 404
+    
+    content = conn.execute("SELECT content FROM article_content WHERE url=?", (article['url'],)).fetchone()['content']
+    conn.close()
+    return render_template('edit.html', article=article, content=content)
+
+# --- 🔒 删除文章 ---
+@app.route('/article/delete/<int:aid>')
+@login_required
+def delete_article(aid):
+    conn = get_db_connection()
+    row = conn.execute("SELECT url FROM articles WHERE id=? AND site_source='user'", (aid,)).fetchone()
+    if row:
+        conn.execute("DELETE FROM articles WHERE id=?", (aid,))
+        conn.execute("DELETE FROM article_content WHERE url=?", (row['url'],))
+        conn.commit()
+    conn.close()
+    return redirect('/admin')
+
+# --- 🔒 系统日志 ---
+@app.route('/logs')
+@login_required
+def show_logs():
+    conn = get_db_connection()
+    logs = conn.execute('SELECT last_scrape FROM scrape_log ORDER BY id DESC LIMIT 50').fetchall()
+    visitors = conn.execute('SELECT * FROM visit_stats ORDER BY last_visit DESC LIMIT 30').fetchall()
+    conn.close()
+    return render_template('logs.html', logs=logs, visitors=visitors)
+
+# --- 图片代理 (防盗链) ---
+@app.route('/img_proxy')
+def img_proxy():
+    url = request.args.get('url')
+    if not url: return "", 404
+    try:
+        r = requests.get(url, headers=HEADERS, stream=True, timeout=10)
+        return Response(r.content, content_type=r.headers.get('Content-Type'))
+    except: return Response(status=404)
 
 # ==========================================
 # 5. 启动
@@ -302,3 +442,4 @@ if __name__ == '__main__':
     scheduler.start()
     threading.Thread(target=scrape_all_sites).start()
     serve(app, host='0.0.0.0', port=8080, threads=10, max_request_body_size=104857600)
+
