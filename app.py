@@ -312,7 +312,7 @@ def view():
     elif site_key in SITES_CONFIG:
         # 缓存无数据，实时抓取
         try:
-            r = session_req.get(url, timeout=10)
+            r = session_http.get(url, timeout=10)
             r.encoding = 'utf-8'
             soup = BeautifulSoup(r.text, "html.parser")
             selectors = SITES_CONFIG[site_key]["content_selector"].split(',')
@@ -442,4 +442,5 @@ if __name__ == '__main__':
     scheduler.start()
     threading.Thread(target=scrape_all_sites).start()
     serve(app, host='0.0.0.0', port=8080, threads=10, max_request_body_size=104857600)
+
 
