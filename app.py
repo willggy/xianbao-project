@@ -192,21 +192,69 @@ def admin_panel():
     conn.close()
     return render_template('admin.html', whitelist=whitelist, blacklist=blacklist, my_articles=my_articles, stats=stats)
 
-# --- 发布文章 ---
-@app.route('/publish', methods=['POST'])
+# --- 🔒 发布新文章 ---
+@app.route('/publish', methods=['GET', 'POST'])
 @login_required
 def publish():
-    title = request.form.get('title')
-    content = request.form.get('content')
-    if title and content:
-        url = f"user_{int(time.time())}"
-        now = (datetime.utcnow() + timedelta(hours=8)).strftime("%H:%M")
+    if request.method == 'POST':
+        title = request.form.get('title')
+        raw_content = request.form.get('content')
+        is_top = 1 if request.form.get('publish_mode') == 'top' else 0
+        
+        # 只处理 Base64 图片上传
+        def img_replacer(match):
+            try:
+                cdn = upload_to_img_cdn(base64.b64decode(match.group(2)))
+                return f'src="{cdn}"' if cdn else match.group(0)
+            except: return match.group(0)
+        
+        processed = re.sub(r'src="data:image\/(.*?);base64,(.*?)"', img_replacer, raw_content)
+        fake_url = f"user://{int(time.time())}"
+        
         conn = get_db_connection()
-        conn.execute("INSERT INTO articles (title, url, site_source, match_keyword, original_time) VALUES (?,?,?,?,?)",
-                     (title, url, 'user', '自发', now))
-        conn.execute("INSERT INTO article_content (url, content) VALUES (?,?)", (url, content))
-        conn.commit(); conn.close()
-    return redirect('/admin')
+        conn.execute("INSERT INTO articles (title, url, site_source, match_keyword, original_time, is_top) VALUES (?,?,?,?,?,?)",
+                     (title, fake_url, "user", "羊毛精选", "刚刚", is_top))
+        conn.execute("INSERT INTO article_content (url, content) VALUES (?,?)", (fake_url, processed))
+        conn.commit()
+        conn.close()
+        return redirect('/')
+    return render_template('publish.html')
+# --- 🔒 编辑文章 ---
+@app.route('/article/edit/<int:aid>', methods=['GET', 'POST'])
+@login_required
+def edit_article(aid):
+    conn = get_db_connection()
+    
+    if request.method == 'POST':
+        title = request.form.get('title')
+        raw_content = request.form.get('content')
+        is_top = 1 if request.form.get('publish_mode') == 'top' else 0
+        
+        # 只上传新粘贴的 Base64 图片
+        def img_replacer(match):
+            try:
+                cdn = upload_to_img_cdn(base64.b64decode(match.group(2)))
+                return f'src="{cdn}"' if cdn else match.group(0)
+            except: return match.group(0)
+            
+        processed = re.sub(r'src="data:image\/(.*?);base64,(.*?)"', img_replacer, raw_content)
+        
+        row = conn.execute("SELECT url FROM articles WHERE id=?", (aid,)).fetchone()
+        if row:
+            conn.execute("UPDATE articles SET title=?, is_top=? WHERE id=?", (title, is_top, aid))
+            conn.execute("UPDATE article_content SET content=? WHERE url=?", (processed, row['url']))
+            conn.commit()
+        
+        conn.close()
+        return redirect('/admin')
+
+    article = conn.execute("SELECT * FROM articles WHERE id=? AND site_source='user'", (aid,)).fetchone()
+    if not article: return "未找到文章", 404
+    
+    content = conn.execute("SELECT content FROM article_content WHERE url=?", (article['url'],)).fetchone()['content']
+    conn.close()
+    return render_template('edit.html', article=article, content=content)
+
 
 # --- 置顶切换 ---
 @app.route('/article/top/<int:aid>')
@@ -325,3 +373,4 @@ if __name__ == '__main__':
     scheduler.start()
     threading.Thread(target=scrape_all_sites).start()
     serve(app, host='0.0.0.0', port=8080, threads=10)
+
