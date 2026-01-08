@@ -15,102 +15,73 @@
             --ios-blue: #007aff;
         }
 
-        body {
-            background-color: var(--bg-color);
-            font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-            margin: 0;
-            padding-bottom: 30px;
-        }
+        body { background-color: var(--bg-color); font-family: -apple-system, BlinkMacSystemFont, sans-serif; margin: 0; padding-bottom: 30px; }
 
-        /* 核心修复：确保 Header 及其子项在最上层 */
         .app-header {
-            position: sticky;
-            top: 0;
-            z-index: 9999 !important; 
-            background: var(--header-bg);
-            backdrop-filter: blur(20px);
-            -webkit-backdrop-filter: blur(20px);
-            border-bottom: 1px solid rgba(0,0,0,0.1);
+            position: sticky; top: 0; z-index: 1020; 
+            background: var(--header-bg); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+            border-bottom: 1px solid rgba(0,0,0,0.05);
         }
 
-        .title-bar {
-            padding: 12px 15px 5px 15px;
-            font-weight: 700;
-            font-size: 1.2rem;
-            color: #000;
-        }
+        .title-bar { padding: 15px 15px 5px 15px; font-weight: 700; font-size: 1.3rem; color: #000; display: flex; align-items: center; gap: 8px; }
 
-        /* 导航容器：不设 overflow 以免截断下拉菜单 */
-        .nav-wrapper {
-            padding: 8px 15px 12px 15px;
-            display: flex;
-            align-items: center;
-            gap: 10px;
-        }
+        .nav-wrapper { padding: 8px 15px 10px 15px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 
         .nav-pill {
-            display: inline-block;
-            padding: 6px 14px;
-            border-radius: 18px;
-            font-size: 13px;
-            font-weight: 500;
-            text-decoration: none;
-            color: var(--text-main);
-            background: rgba(0,0,0,0.05);
-            border: none;
-            white-space: nowrap;
+            display: inline-block; padding: 5px 14px; border-radius: 18px; font-size: 14px; font-weight: 500;
+            text-decoration: none; color: var(--text-main); background: rgba(0,0,0,0.05); border: none; white-space: nowrap;
         }
+        .nav-pill.active { background: var(--ios-blue); color: white !important; }
+
+        .dropdown-menu { z-index: 2000 !important; border-radius: 12px; box-shadow: 0 10px 25px rgba(0,0,0,0.15); border: none; }
+
+        /* 搜索区域极致优化 */
+        #searchCollapse { background: transparent; padding: 0 15px 12px; }
         
-        .nav-pill.active {
-            background: var(--ios-blue);
-            color: white !important;
-        }
-
-        /* 下拉菜单绝对定位修复 */
-        .dropdown-menu {
-            position: absolute !important;
-            z-index: 10000 !important;
-            border-radius: 12px;
-            box-shadow: 0 10px 25px rgba(0,0,0,0.15);
-            border: 1px solid rgba(0,0,0,0.05);
-            margin-top: 5px !important;
-        }
-
-        /* 搜索折叠栏 */
-        #searchCollapse {
+        .search-container { 
+            max-width: 280px; /* 宽度适中 */
             background: #fff;
-            border-bottom: 1px solid #eee;
-            padding: 10px 15px;
-        }
-
-        /* 列表区域层级降低 */
-        .list-container {
-            max-width: 800px;
-            margin: 0 auto;
-            background: #fff;
-            position: relative;
-            z-index: 1; 
-        }
-        
-        @media (min-width: 768px) {
-            .list-container { margin-top: 20px; border-radius: 12px; overflow: hidden; }
-        }
-
-        .list-item {
+            padding: 3px;
+            border-radius: 8px;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.06);
             display: flex;
-            justify-content: space-between;
             align-items: center;
-            padding: 14px 16px;
-            border-bottom: 1px solid #efefef;
-            text-decoration: none !important;
-            color: inherit !important;
+            height: 34px; /* 固定整体高度 */
         }
         
-        .list-item:active { background-color: #e5e5e5; }
+        .search-input-sm { 
+            border: none !important; 
+            font-size: 13px !important; 
+            padding: 0 10px !important;
+            height: 100% !important;
+            background: transparent !important;
+            flex: 1; /* 占据剩余空间 */
+        }
+        .search-input-sm:focus { box-shadow: none !important; }
 
-        .item-title { font-size: 15px; line-height: 1.5; color: #000; flex-grow: 1; margin-right: 15px; }
+        .btn-search-sm { 
+            height: 28px !important; /* 按钮高度略小于容器 */
+            padding: 0 18px !important; /* 增加左右内边距，让按钮变长 */
+            font-size: 12px !important; 
+            border-radius: 6px !important;
+            background-color: var(--ios-blue) !important;
+            border: none !important;
+            color: #fff !important;
+            white-space: nowrap !important; /* 禁止换行 */
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        /* 列表及其他样式保持一致 */
+        .list-container { max-width: 800px; margin: 10px auto; background: #fff; border-radius: 14px; overflow: hidden; position: relative; z-index: 1; }
+        .refresh-bar { padding: 12px 16px 5px; font-size: 13px; color: #999; display: flex; align-items: center; gap: 5px; }
+        .time-highlight { color: #ff3b30; font-weight: bold; }
+        .list-item { display: flex; justify-content: space-between; align-items: center; padding: 14px 16px; border-bottom: 1px solid #f2f2f7; text-decoration: none !important; color: inherit !important; }
+        .list-item:active { background-color: #f2f2f7; }
+        .item-title { font-size: 15px; line-height: 1.5; color: #1c1c1e; flex-grow: 1; margin-right: 15px; }
         .badge-top { background-color: #ff3b30; color: white; font-size: 10px; padding: 1px 4px; border-radius: 4px; margin-right: 5px; font-weight: bold; }
-        .item-time { font-size: 12px; color: var(--text-sub); font-family: monospace; }
+        .item-time { font-size: 12px; color: var(--text-sub); white-space: nowrap; }
     </style>
 </head>
 <body>
@@ -125,7 +96,7 @@
                 <a href="/" class="nav-pill {{ 'active' if not current_tag else '' }}">全部</a>
                 
                 <div class="dropdown">
-                    <button class="nav-pill dropdown-toggle {{ 'active' if current_tag in bank_list else '' }}" type="button" data-bs-toggle="dropdown" aria-expanded="false">
+                    <button class="nav-pill dropdown-toggle {{ 'active' if current_tag in bank_list else '' }}" type="button" data-bs-toggle="dropdown">
                         银行活动
                     </button>
                     <ul class="dropdown-menu">
@@ -144,23 +115,24 @@
         </div>
 
         <div class="collapse" id="searchCollapse">
-            <div class="container" style="max-width: 800px; margin: 0 auto;">
-                <form action="/" method="get" class="d-flex gap-2">
-                    <input type="text" name="q" class="form-control form-control-sm" placeholder="搜索关键词..." value="{{ q or '' }}" style="border-radius: 8px;">
-                    <button type="submit" class="btn btn-primary btn-sm" style="border-radius: 8px; white-space: nowrap;">搜索</button>
+            <div class="container" style="max-width: 800px; margin: 0 auto; padding: 0 15px;">
+                <form action="/" method="get" class="search-container">
+                    <input type="text" name="q" class="form-control search-input-sm" placeholder="搜索关键词..." value="{{ q or '' }}">
+                    <button type="submit" class="btn btn-primary btn-sm btn-search-sm">确定</button>
                 </form>
             </div>
         </div>
     </header>
+
     <div class="list-container">
-        <div style="font-size: 11px; color: #999; padding: 12px 16px 0; display: flex; align-items: center; gap: 4px;">
+        <div class="refresh-bar">
             <i class="bi bi-clock-history"></i> 
-            每 5 分钟自动刷新，下次刷新：<span style="color: #ff3b30; font-weight: bold;">{{ next_refresh_time }}</span>
+            每 5 分钟自动刷新，下次刷新：<span class="time-highlight">{{ next_refresh_time }}</span>
         </div>
         
         {% if articles %}
             {% for article in articles %}
-            <a href="/view?id={{ article.id }}" class="list-item">
+            <a href="/view?id={{ article.id }}" class="list-item" target="_blank">
                 <div class="item-title">
                     {% if article.is_top %}<span class="badge-top">置顶</span>{% endif %}
                     {{ article.title }}
@@ -174,17 +146,15 @@
     </div>
 
     {% if total_pages > 1 %}
-    <div class="pagination-simple d-flex justify-content-center gap-3 py-4">
+    <div class="d-flex justify-content-center gap-3 py-4">
         <a href="/?page={{ current_page - 1 }}{{ '&tag=' + current_tag if current_tag else '' }}{{ '&q=' + q if q else '' }}" 
-           class="btn btn-outline-secondary btn-sm {{ 'disabled' if current_page == 1 else '' }}" style="border-radius: 20px;">上一页</a>
-        <span class="small text-muted" style="line-height: 30px;">{{ current_page }} / {{ total_pages }}</span>
+           class="nav-pill {{ 'disabled' if current_page == 1 else '' }}">上一页</a>
+        <span class="small text-muted align-self-center">{{ current_page }} / {{ total_pages }}</span>
         <a href="/?page={{ current_page + 1 }}{{ '&tag=' + current_tag if current_tag else '' }}{{ '&q=' + q if q else '' }}" 
-           class="btn btn-outline-secondary btn-sm {{ 'disabled' if current_page == total_pages else '' }}" style="border-radius: 20px;">下一页</a>
+           class="nav-pill {{ 'disabled' if current_page == total_pages else '' }}">下一页</a>
     </div>
     {% endif %}
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 </body>
 </html>
-
-

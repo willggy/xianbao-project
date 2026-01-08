@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="referrer" content="no-referrer">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>{{ title }}</title> 
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css" rel="stylesheet">
@@ -11,186 +11,92 @@
         :root {
             --bg-color: #f2f4f8;
             --text-main: #1d1d1f;
+            --fujia-bg: #f8fbff;
+            --fujia-border: #d0e3ff;
         }
 
-        body { 
-            background: var(--bg-color);
-            min-height: 100vh;
-            padding: 20px 0;
-            font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
-            color: var(--text-main);
-        }
+        body { background: var(--bg-color); min-height: 100vh; padding: 15px 0; font-family: -apple-system, BlinkMacSystemFont, sans-serif; }
+        .container { max-width: 800px; margin: 0 auto; }
         
-        .container { 
-            max-width: 800px; /* 稍微窄一点，阅读体验更好 */
-            margin: 0 auto;
-        }
-        
-        .back-btn {
-            background: rgba(255, 255, 255, 0.8);
-            backdrop-filter: blur(10px);
-            border: 1px solid rgba(0,0,0,0.05);
-            padding: 8px 20px;
-            border-radius: 20px;
-            color: #555;
-            font-weight: 600;
-            font-size: 0.9rem;
-            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05);
-            transition: all 0.3s ease;
-            text-decoration: none;
-            display: inline-flex;
-            align-items: center;
-            gap: 5px;
-        }
-        
-        .back-btn:hover {
-            transform: translateX(-3px);
-            background: #fff;
-            color: #007aff;
-            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
-        }
-        
-        .article-card {
-            background: #ffffff;
-            padding: 40px;
-            border-radius: 24px;
-            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.04);
-            margin-top: 20px;
-            min-height: 60vh;
-            border: 1px solid rgba(0,0,0,0.02);
-        }
-        
-        .article-card h1 {
-            font-size: 1.8rem;
-            font-weight: 800;
-            color: #111;
-            margin-bottom: 30px;
-            line-height: 1.4;
-            letter-spacing: -0.5px;
-        }
+        /* 返回按钮修复 */
+        .back-nav { margin-bottom: 15px; }
+        .back-nav a { text-decoration: none; color: #666; font-size: 1rem; display: inline-flex; align-items: center; }
 
-        .article-content {
-            line-height: 1.8;
-            color: #333;
-            font-size: 1.05rem;
-            overflow-wrap: break-word; 
-        }
-        
-        /* 图片样式 */
+        .article-card { background: #fff; border-radius: 16px; padding: 20px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); }
+        .article-title { font-size: 1.3rem; font-weight: 700; margin-bottom: 15px; line-height: 1.4; }
+
+        /* 正文图片缩略图化 */
+        .article-content { font-size: 1.05rem; line-height: 1.8; word-wrap: break-word; }
         .article-content img {
-            max-width: 100%;
-            width: auto;
-            max-width: 300px;  
-            max-height: 400px;
-            display: block;    
-            margin: 25px 0;    
-            border-radius: 12px;
-            box-shadow: 0 8px 20px rgba(0, 0, 0, 0.08);
-            cursor: zoom-in; 
-            object-fit: contain; 
-        }
-        
-        /* 强制隐藏 */
-        .article-content .head-info,
-        .article-content .mochu_us_shoucang,
-        .article-content .mochu-us-coll,
-        .article-content .mochu-us-copy,
-        .article-content #post_reply,
-        .article-content .mbm,
-         /*.article-content .message,*/
-        .article-content .t_f + .mt10,
-        .article-content .pgbt,
-        .article-content .form_top,
-        .article-content form { display: none !important; }
-        
-        .article-content a {
-            color: #007aff;
-            text-decoration: none;
-            border-bottom: 1px solid rgba(0, 122, 255, 0.2);
-            transition: all 0.2s;
-        }
-        .article-content a:hover {
-            border-bottom-color: #007aff;
+            max-width: 100%;    /* 宽度最大不超过正文容器 */
+            height: auto;       /* 高度自动，保持原图比例 */
+            max-height: 80vh;   /* 限制最大高度为屏幕高度的 80%，防止长图刷不到底 */
+            object-fit: contain;/* 确保图片完整显示 */
+            border-radius: 8px; /* 稍微圆角更美观 */
+            box-shadow: 0 2px 8px rgba(0,0,0,0.05); /* 轻微阴影提升质感 */
         }
 
-        /* 模态框 */
+        /* 附加信息样式区分 */
+        #art-fujia {
+            margin-top: 20px;
+            padding: 15px;
+            background: var(--fujia-bg);
+            border: 1px dashed var(--fujia-border);
+            border-radius: 12px;
+        }
+        #art-fujia::before {
+            content: "📢 附加内容 / 附件";
+            display: block; font-size: 13px; color: #007aff; font-weight: bold; margin-bottom: 10px;
+        }
+
+        /* 放大模态框 */
         .image-modal {
-            display: none;
-            position: fixed;
-            z-index: 1050;
-            left: 0;
-            top: 0;
-            width: 100%;
-            height: 100%;
-            background-color: rgba(0, 0, 0, 0.95);
-            backdrop-filter: blur(5px);
-            opacity: 0;
-            transition: opacity 0.3s ease;
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.9); display: none; z-index: 2000;
+            justify-content: center; align-items: center;
         }
-        .image-modal.active { display: block; opacity: 1; }
-        .image-modal-content {
-            margin: auto; display: block;
-            max-width: 90%; max-height: 90vh;
-            position: relative; top: 50%;
-            transform: translateY(-50%);
-            border-radius: 8px;
-            box-shadow: 0 0 50px rgba(0,0,0,0.5);
-        }
-        .image-modal-close {
-            position: absolute; top: 20px; right: 40px;
-            color: #fff; font-size: 40px; cursor: pointer;
-            z-index: 1060; opacity: 0.8;
-        }
-        .image-modal-close:hover { opacity: 1; }
+        .image-modal.active { display: flex; }
+        .image-modal-content { max-width: 98%; max-height: 98%; object-fit: contain; }
     </style>
 </head>
 <body>
-    <div class="container py-4">
-        
-        <div class="mb-3">
-            <a href="/" class="back-btn">
-                <i class="bi bi-chevron-left"></i> 返回列表
-            </a>
+    <div class="container px-3">
+        <div class="back-nav">
+            <a href="/"><i class="bi bi-chevron-left me-1"></i>返回首页</a>
         </div>
 
         <div class="article-card">
-            <h1>{{ title }}</h1>
+            <div class="article-title">{{ title }}</div>
+            
             <div class="article-content">
-                {{ content | safe }} 
+                {{ content | safe }}
             </div>
-        </div>
-        
+            
+            </div>
     </div>
 
     <div id="imageModal" class="image-modal">
-        <span class="image-modal-close">&times;</span>
         <img class="image-modal-content" id="modalImage">
     </div>
 
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
     <script>
         document.addEventListener('DOMContentLoaded', function() {
-            const images = document.querySelectorAll('.article-content img');
             const modal = document.getElementById('imageModal');
             const modalImg = document.getElementById('modalImage');
-            const closeBtn = document.querySelector('.image-modal-close');
             
-            images.forEach(function(img) {
-                img.addEventListener('click', function() {
+            // 劫持所有图片点击事件
+            document.querySelector('.article-content').addEventListener('click', function(e) {
+                if (e.target.tagName === 'IMG') {
                     modal.classList.add('active');
-                    modalImg.src = this.src;
+                    modalImg.src = e.target.src;
                     document.body.style.overflow = 'hidden'; 
-                });
+                }
             });
             
-            function closeModal() {
+            modal.addEventListener('click', function() {
                 modal.classList.remove('active');
                 document.body.style.overflow = 'auto'; 
-            }
-            
-            closeBtn.addEventListener('click', closeModal);
-            modal.addEventListener('click', function(e) { if (e.target === modal) closeModal(); });
-            document.addEventListener('keydown', function(e) { if (e.key === 'Escape' && modal.classList.contains('active')) closeModal(); });
+            });
         });
     </script>
 </body>
