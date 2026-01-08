@@ -124,22 +124,34 @@ def get_db_connection():
 def clean_html(html_content, site_key):
     if not html_content: return ""
     soup = BeautifulSoup(html_content, "html.parser")
+    
+    # 遍历所有标签
     for tag in soup.find_all(True):
+        # 1. 处理图片 (保持之前说的比例自适应)
         if tag.name == 'img':
             src = tag.get('src', '')
             if src.startswith('/'): 
                 src = SITES_CONFIG.get(site_key, {}).get('domain', '') + src
-            
-            # 核心修改：移除 width, height 等所有可能干扰比例的属性
-            # 仅保留必要的 src 和懒加载属性
             tag.attrs = {
                 'src': src, 
                 'referrerpolicy': 'no-referrer',
-                'loading': 'lazy',
-                'style': 'display: block; margin: 10px auto;' # 让图片居中
+                'loading': 'lazy'
             }
+        
+        # 2. 处理超链接 (确保 a 标签被保留并能在新窗口打开)
         elif tag.name == 'a':
-            tag.attrs = {'href': tag.get('href'), 'target': '_blank'}
+            href = tag.get('href', '')
+            if href:
+                # 补全相对路径链接
+                if href.startswith('/'):
+                    href = SITES_CONFIG.get(site_key, {}).get('domain', '') + href
+                tag.attrs = {
+                    'href': href,
+                    'target': '_blank',
+                    'rel': 'noopener noreferrer',
+                    'class': 'content-link' # 给链接加个类名方便写样式
+                }
+    
     return str(soup)
 
 def record_visit():
@@ -457,4 +469,5 @@ if __name__ == '__main__':
     scheduler.start()
     threading.Thread(target=scrape_all_sites).start()
     print("Serving on port 8080...")
+
     serve(app, host='0.0.0.0', port=8080, threads=10)
