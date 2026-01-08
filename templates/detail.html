@@ -35,7 +35,16 @@
             border-radius: 8px; /* 稍微圆角更美观 */
             box-shadow: 0 2px 8px rgba(0,0,0,0.05); /* 轻微阴影提升质感 */
         }
-
+        /* 详情页超链接样式 */
+        .article-content a {
+            color: #007aff !important;      /* 使用 iOS 蓝色 */
+            text-decoration: underline;    /* 显示下划线 */
+            word-break: break-all;         /* 强制长链接换行，防止撑破屏幕 */
+        }
+        
+        .article-content a:active {
+            opacity: 0.6;                  /* 点击时的反馈效果 */
+        }
         /* 附加信息样式区分 */
         #art-fujia {
             margin-top: 20px;
@@ -100,4 +109,5 @@
         });
     </script>
 </body>
+
 </html>
