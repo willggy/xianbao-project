@@ -126,30 +126,31 @@ def make_links_clickable(text):
     pattern = re.compile(r'(?<!href=")(https?://[^\s"<]+)', re.IGNORECASE)
     return pattern.sub(r'<a href="\1" target="_blank" rel="noopener noreferrer" class="content-link">\1</a>', text)
 
-
 def clean_html(html_content, site_key):
     if not html_content:
         return ""
 
     soup = BeautifulSoup(html_content, "html.parser")
 
-    # 1）处理所有标签
     for tag in soup.find_all(True):
-        
-        # 图片
+        # 图片处理
         if tag.name == 'img':
-            src = tag.get('src', '')
+            src = tag.get('src', '').strip()
+            
+            # 相对路径 → 完整 URL
             if src.startswith('/'):
                 src = SITES_CONFIG.get(site_key, {}).get('domain', '') + src
+
+            # 只改 HTML 属性，不下载图片
             tag.attrs = {
                 'src': src,
                 'referrerpolicy': 'no-referrer',
                 'loading': 'lazy'
             }
 
-        # 链接
+        # 链接处理
         elif tag.name == 'a':
-            href = tag.get('href', '')
+            href = tag.get('href', '').strip()
             if href:
                 if href.startswith('/'):
                     href = SITES_CONFIG.get(site_key, {}).get('domain', '') + href
@@ -160,10 +161,10 @@ def clean_html(html_content, site_key):
                     'class': 'content-link'
                 }
 
-    # 2）处理完 soup 再转字符串
+    # 转字符串
     html_str = str(soup)
 
-    # 3）处理纯文本 URL → 转成可点击链接
+    # 纯文本 URL → 点击链接
     html_str = make_links_clickable(html_str)
 
     return html_str
@@ -485,4 +486,5 @@ if __name__ == '__main__':
     print("Serving on port 8080...")
 
     serve(app, host='0.0.0.0', port=8080, threads=10)
+
 
