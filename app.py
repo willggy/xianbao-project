@@ -121,38 +121,52 @@ def get_db_connection():
     conn.commit()
     return conn
 
+def make_links_clickable(text):
+    # 匹配 http/https URL，但排除已经在 href= 里的情况
+    pattern = re.compile(r'(?<!href=")(https?://[^\s"<]+)', re.IGNORECASE)
+    return pattern.sub(r'<a href="\1" target="_blank" rel="noopener noreferrer" class="content-link">\1</a>', text)
+
+
 def clean_html(html_content, site_key):
-    if not html_content: return ""
+    if not html_content:
+        return ""
+
     soup = BeautifulSoup(html_content, "html.parser")
-    
-    # 遍历所有标签
+
+    # 1）处理所有标签
     for tag in soup.find_all(True):
-        # 1. 处理图片 (保持之前说的比例自适应)
+        
+        # 图片
         if tag.name == 'img':
             src = tag.get('src', '')
-            if src.startswith('/'): 
+            if src.startswith('/'):
                 src = SITES_CONFIG.get(site_key, {}).get('domain', '') + src
             tag.attrs = {
-                'src': src, 
+                'src': src,
                 'referrerpolicy': 'no-referrer',
                 'loading': 'lazy'
             }
-        
-        # 2. 处理超链接 (确保 a 标签被保留并能在新窗口打开)
+
+        # 链接
         elif tag.name == 'a':
             href = tag.get('href', '')
             if href:
-                # 补全相对路径链接
                 if href.startswith('/'):
                     href = SITES_CONFIG.get(site_key, {}).get('domain', '') + href
                 tag.attrs = {
                     'href': href,
                     'target': '_blank',
                     'rel': 'noopener noreferrer',
-                    'class': 'content-link' # 给链接加个类名方便写样式
+                    'class': 'content-link'
                 }
-    
-    return str(soup)
+
+    # 2）处理完 soup 再转字符串
+    html_str = str(soup)
+
+    # 3）处理纯文本 URL → 转成可点击链接
+    html_str = make_links_clickable(html_str)
+
+    return html_str
 
 def record_visit():
     ua = request.headers.get('User-Agent', '')
@@ -471,3 +485,4 @@ if __name__ == '__main__':
     print("Serving on port 8080...")
 
     serve(app, host='0.0.0.0', port=8080, threads=10)
+
