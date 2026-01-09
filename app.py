@@ -7,7 +7,7 @@ import re
 # 【修改1】引入 timezone 模块以支持新版时间标准
 from datetime import datetime, timedelta, timezone
 from functools import wraps
-
+from urllib.parse import quote, unquote, urlparse
 import requests
 from requests.adapters import HTTPAdapter
 from flask import Flask, render_template, request, Response, redirect, session, url_for
@@ -127,47 +127,37 @@ def make_links_clickable(text):
     return pattern.sub(r'<a href="\1" target="_blank" rel="noopener noreferrer" class="content-link">\1</a>', text)
 
 def clean_html(html_content, site_key):
-    if not html_content:
-        return ""
-
+    if not html_content: return ""
     soup = BeautifulSoup(html_content, "html.parser")
 
     for tag in soup.find_all(True):
         # 图片处理
         if tag.name == 'img':
             src = tag.get('src', '').strip()
-            
-            # 相对路径 → 完整 URL
-            if src.startswith('/'):
-                src = SITES_CONFIG.get(site_key, {}).get('domain', '') + src
+            if not src: continue
 
-            # 只改 HTML 属性，不下载图片
+            # 补全相对路径
+            if src.startswith('/'):
+                src = SITES_CONFIG[site_key]['domain'] + src
+
+            # URL encode，保留 URL 特殊字符
+            proxy_url = "/img_proxy?url=" + quote(src, safe='/:?=&')
+
             tag.attrs = {
-                'src': src,
-                'referrerpolicy': 'no-referrer',
-                'loading': 'lazy'
+                'src': proxy_url,
+                'loading': 'lazy',
+                'style': 'max-width:100%; border-radius:8px; display:block; margin:10px 0;'
             }
 
         # 链接处理
         elif tag.name == 'a':
             href = tag.get('href', '').strip()
-            if href:
-                if href.startswith('/'):
-                    href = SITES_CONFIG.get(site_key, {}).get('domain', '') + href
-                tag.attrs = {
-                    'href': href,
-                    'target': '_blank',
-                    'rel': 'noopener noreferrer',
-                    'class': 'content-link'
-                }
+            if not href: continue
+            if href.startswith('/'):
+                href = SITES_CONFIG[site_key]['domain'] + href
+            tag.attrs = {'href': href, 'target': '_blank', 'style': 'color: #007aff; text-decoration: none;'}
 
-    # 转字符串
-    html_str = str(soup)
-
-    # 纯文本 URL → 点击链接
-    html_str = make_links_clickable(html_str)
-
-    return html_str
+    return str(soup)
 
 def record_visit():
     ua = request.headers.get('User-Agent', '')
@@ -394,12 +384,25 @@ def show_logs():
 
 @app.route('/img_proxy')
 def img_proxy():
-    url = request.args.get('url')
-    if not url: return Response(status=404)
+    url = request.args.get('url', '').strip()
+    if not url:
+        return "", 404
+
+    # 解码 URL
+    url = unquote(url)
+
+    # 验证 URL 有效性
+    parsed = urlparse(url)
+    if not parsed.scheme or parsed.scheme not in ['http', 'https']:
+        print("Blocked invalid URL:", url)
+        return "", 404
+
     try:
-        r = session_req.get(url, headers=HEADERS, stream=True, timeout=5)
-        return Response(r.content, content_type=r.headers.get('Content-Type'))
-    except:
+        r = requests.get(url, headers={"User-Agent": HEADERS["User-Agent"], "Referer": ""}, stream=True, timeout=15)
+        content_type = r.headers.get('Content-Type', 'image/jpeg')
+        return Response(r.content, content_type=content_type)
+    except Exception as e:
+        print("IMG_PROXY ERROR:", e)
         return Response(status=404)
 
 @app.route('/login', methods=['GET', 'POST'])
@@ -486,5 +489,6 @@ if __name__ == '__main__':
     print("Serving on port 8080...")
 
     serve(app, host='0.0.0.0', port=8080, threads=10)
+
 
 
