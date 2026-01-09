@@ -6,7 +6,7 @@ import base64
 import re
 # 【修改1】引入 timezone 模块以支持新版时间标准
 from datetime import datetime, timedelta, timezone
-from functools import wraps
+from functools import wraps, lru_cache
 from urllib.parse import quote, unquote, urlparse
 import requests
 from requests.adapters import HTTPAdapter
@@ -127,37 +127,78 @@ def make_links_clickable(text):
     return pattern.sub(r'<a href="\1" target="_blank" rel="noopener noreferrer" class="content-link">\1</a>', text)
 
 def clean_html(html_content, site_key):
-    if not html_content: return ""
+    if not html_content:
+        return ""
+
     soup = BeautifulSoup(html_content, "html.parser")
 
     for tag in soup.find_all(True):
-        # 图片处理
+
+        # ============================
+        # 1) 图片处理逻辑
+        # ============================
         if tag.name == 'img':
             src = tag.get('src', '').strip()
-            if not src: continue
+            if not src:
+                continue
 
-            # 补全相对路径
-            if src.startswith('/'):
+            # ---- 避免重复包装 /img_proxy ----
+            if src.startswith("/img_proxy"):
+                continue
+
+            # ---- 补全各种相对路径 ----
+            if src.startswith('//'):  # //img.xx.com/xx.jpg
+                src = 'https:' + src
+
+            elif src.startswith('/'):  # /upload/xxx.jpg
                 src = SITES_CONFIG[site_key]['domain'] + src
 
-            # URL encode，保留 URL 特殊字符
+            elif src.startswith('./'):  # ./images/xxx.jpg
+                src = SITES_CONFIG[site_key]['domain'] + src[1:]
+
+            elif src.startswith('../'):  # ../xx/xx.jpg
+                src = SITES_CONFIG[site_key]['domain'] + src.replace('../', '', 1)
+
+            # ---- 这里不做更多处理，否则容易误判 HTML 图片 ----
+
+            # ---- URL 转义 + 走 img_proxy ----
             proxy_url = "/img_proxy?url=" + quote(src, safe='/:?=&')
 
             tag.attrs = {
                 'src': proxy_url,
                 'loading': 'lazy',
-                'style': 'max-width:100%; border-radius:8px; display:block; margin:10px 0;'
+                'style': 'max-width:100%; height:auto; border-radius:8px; margin:10px 0;'
             }
 
-        # 链接处理
+        # ============================
+        # 2) 链接处理逻辑
+        # ============================
         elif tag.name == 'a':
             href = tag.get('href', '').strip()
-            if not href: continue
-            if href.startswith('/'):
+            if not href:
+                continue
+
+            # ---- 避免自引用 /img_proxy ----
+            if href.startswith('/img_proxy'):
+                continue
+
+            # ---- 补全相对路径 ----
+            if href.startswith('//'):
+                href = 'https:' + href
+            elif href.startswith('/'):
                 href = SITES_CONFIG[site_key]['domain'] + href
-            tag.attrs = {'href': href, 'target': '_blank', 'style': 'color: #007aff; text-decoration: none;'}
+
+            # ---- 保留为正常蓝色链接 ----
+            tag.attrs = {
+                'href': href,
+                'target': '_blank',
+                'rel': 'noopener noreferrer',
+                'style': 'color:#007aff; text-decoration:underline; word-break:break-all;'
+            }
 
     return str(soup)
+
+
 
 def record_visit():
     ua = request.headers.get('User-Agent', '')
@@ -382,28 +423,49 @@ def show_logs():
     conn.close()
     return render_template('logs.html', logs=logs, visitors=visitors)
 
+@lru_cache(maxsize=200)
+def fetch_image_cached(url):
+    """
+    从远程源下载图片并缓存，避免重复下载。
+    返回 (bytes, content-type)
+    """
+    r = session_req.get(url, headers={"User-Agent": HEADERS["User-Agent"], "Referer": ""}, timeout=15)
+    return r.content, r.headers.get("Content-Type", "image/jpeg")
+
+
 @app.route('/img_proxy')
 def img_proxy():
-    url = request.args.get('url', '').strip()
-    if not url:
+    raw = request.args.get('url', '').strip()
+    if not raw:
         return "", 404
 
     # 解码 URL
-    url = unquote(url)
+    url = unquote(raw)
 
-    # 验证 URL 有效性
+    # 防止重复嵌套自己 /img_proxy?url=/img_proxy?... 造成死循环
+    if url.startswith("/img_proxy"):
+        print("[WARN] Blocked nested img_proxy:", url)
+        return "", 404
+
+    # URL 安全校验
     parsed = urlparse(url)
-    if not parsed.scheme or parsed.scheme not in ['http', 'https']:
-        print("Blocked invalid URL:", url)
+    if parsed.scheme not in ("http", "https"):
+        print("[WARN] Blocked invalid scheme:", url)
         return "", 404
 
     try:
-        r = requests.get(url, headers={"User-Agent": HEADERS["User-Agent"], "Referer": ""}, stream=True, timeout=15)
-        content_type = r.headers.get('Content-Type', 'image/jpeg')
-        return Response(r.content, content_type=content_type)
+        img_bytes, ctype = fetch_image_cached(url)
+        return Response(img_bytes, content_type=ctype)
+
     except Exception as e:
-        print("IMG_PROXY ERROR:", e)
-        return Response(status=404)
+        print("[IMG_PROXY ERROR]", e)
+
+        # 失败时返回一个 1x1 的透明像素，防止页面卡住加载
+        transparent_png = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y1GNnUAAAAASUVORK5CYII="
+        )
+        return Response(transparent_png, content_type="image/png")
+
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
@@ -482,13 +544,7 @@ def scrape_all_sites():
 
 if __name__ == '__main__':
     get_db_connection().close()
-    scheduler = BackgroundScheduler()
-    scheduler.add_job(scrape_all_sites, 'interval', minutes=5)
-    scheduler.start()
-    threading.Thread(target=scrape_all_sites).start()
     print("Serving on port 8080...")
-
-    serve(app, host='0.0.0.0', port=8080, threads=10)
-
+    serve(app, host='0.0.0.0', port=8080, threads=80)
 
 
