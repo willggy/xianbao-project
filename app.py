@@ -25,6 +25,7 @@ SITE_TITLE = "古希腊掌管羊毛的神"
 app.secret_key = os.environ.get('SECRET_KEY', 'xianbao_secret_key_888') 
 ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', '123')  
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024 
+CRON_SECRET = os.environ.get('CRON_SECRET', 'xianbao_secret_key_999')
 
 # 站点配置
 SITES_CONFIG = {
@@ -227,12 +228,12 @@ def index():
     record_visit()
     now = get_beijing_now()
 
-    next_min = (now.minute // 5 + 1) * 5
+    next_min = ((now.minute // 10) + 1) * 10
     if next_min >= 60:
         next_refresh_obj = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
     else:
         next_refresh_obj = now.replace(minute=next_min, second=0, microsecond=0)
-    
+
     next_refresh_time = next_refresh_obj.strftime("%H:%M")
 
     tag = request.args.get('tag')
@@ -477,6 +478,36 @@ def login():
 @app.route('/logout')
 def logout():
     session.clear(); return redirect('/')
+@app.route('/cron/scrape', methods=['GET', 'POST'])
+def cron_scrape():
+    # 支持 header 或 query 参数验证
+    provided_secret = (
+        request.headers.get('Authorization') or
+        request.args.get('secret') or
+        request.form.get('secret')
+    )
+    
+    if provided_secret != CRON_SECRET:
+        return {"error": "Unauthorized"}, 401
+    
+    now = get_beijing_now()
+    print(f"[{now.strftime('%Y-%m-%d %H:%M:%S')}] Cron triggered by: {request.headers.get('User-Agent', 'Unknown')}")
+    
+    # 可选：最近5分钟有人访问过就跳过，避免和高峰冲突
+    if (now - LAST_ACTIVE_TIME).total_seconds() < 300:
+        print(f"[{now}] Skip cron: recent activity detected")
+        return {"status": "skipped", "reason": "recent activity"}, 200
+    
+    try:
+        scrape_all_sites()
+        return {
+            "status": "success",
+            "executed_at": now.strftime("%Y-%m-%d %H:%M:%S"),
+            "message": "抓取完成"
+        }, 200
+    except Exception as e:
+        print(f"Cron error: {e}")
+        return {"status": "error", "message": str(e)}, 500
 
 # ==========================================
 # 4. 抓取与启动
@@ -546,5 +577,4 @@ if __name__ == '__main__':
     get_db_connection().close()
     print("Serving on port 8080...")
     serve(app, host='0.0.0.0', port=8080, threads=80)
-
 
