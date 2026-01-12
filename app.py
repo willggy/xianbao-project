@@ -10,7 +10,7 @@ from functools import wraps, lru_cache
 from urllib.parse import quote, unquote, urlparse
 import requests
 from requests.adapters import HTTPAdapter
-from flask import Flask, render_template, request, Response, redirect, session, url_for
+from flask import Flask, flash, render_template, request, Response, redirect, session, url_for
 from bs4 import BeautifulSoup
 from apscheduler.schedulers.background import BackgroundScheduler
 from waitress import serve
@@ -320,6 +320,21 @@ def admin_panel():
         conn.close()
     return render_template('admin.html', whitelist=whitelist, blacklist=blacklist, my_articles=my_articles, stats=stats)
 
+@app.route('/admin/refresh', methods=['GET', 'POST'])
+@login_required  # 必须登录才能手动刷新（最安全）
+def admin_refresh():
+    now = get_beijing_now()
+    print(f"[{now.strftime('%Y-%m-%d %H:%M:%S')}] 手动刷新触发 by admin")
+    
+    try:
+        scrape_all_sites()  # 直接调用抓取函数
+        flash("手动刷新成功！已抓取最新内容", "success")  # Flask flash 提示
+    except Exception as e:
+        print(f"手动刷新失败: {e}")
+        flash(f"刷新失败：{str(e)}", "error")
+    
+    return redirect(url_for('admin_panel'))  # 刷新后跳回 admin 面板
+
 @app.route('/publish', methods=['GET', 'POST'])
 @login_required
 def publish():
@@ -440,15 +455,12 @@ def img_proxy():
     if not raw:
         return "", 404
 
-    # 解码 URL
     url = unquote(raw)
 
-    # 防止重复嵌套自己 /img_proxy?url=/img_proxy?... 造成死循环
     if url.startswith("/img_proxy"):
         print("[WARN] Blocked nested img_proxy:", url)
         return "", 404
 
-    # URL 安全校验
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https"):
         print("[WARN] Blocked invalid scheme:", url)
@@ -460,12 +472,15 @@ def img_proxy():
 
     except Exception as e:
         print("[IMG_PROXY ERROR]", e)
-
-        # 失败时返回一个 1x1 的透明像素，防止页面卡住加载
-        transparent_png = base64.b64decode(
-            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y1GNnUAAAAASUVORK5CYII="
-        )
-        return Response(transparent_png, content_type="image/png")
+        
+        error_html = f'''
+        <div style="text-align:center; padding:20px; color:#666; font-family: system-ui, sans-serif;">
+            <p>代理加载失败（源站拒绝连接）</p>
+            <p><a href="{url}" target="_blank" style="color:#007aff; text-decoration:underline;">点击查看原图</a></p>
+            <small>（可能需科学上网或稍后重试）</small>
+        </div>
+        '''
+        return Response(error_html, content_type='text/html')
 
 
 @app.route('/login', methods=['GET', 'POST'])
@@ -478,6 +493,7 @@ def login():
 @app.route('/logout')
 def logout():
     session.clear(); return redirect('/')
+
 @app.route('/cron/scrape', methods=['GET', 'POST'])
 def cron_scrape():
     # 支持 header 或 query 参数验证
@@ -492,11 +508,10 @@ def cron_scrape():
     
     now = get_beijing_now()
     print(f"[{now.strftime('%Y-%m-%d %H:%M:%S')}] Cron triggered by: {request.headers.get('User-Agent', 'Unknown')}")
-    
     # 可选：最近5分钟有人访问过就跳过，避免和高峰冲突
-    if (now - LAST_ACTIVE_TIME).total_seconds() < 300:
-        print(f"[{now}] Skip cron: recent activity detected")
-        return {"status": "skipped", "reason": "recent activity"}, 200
+    # if (now - LAST_ACTIVE_TIME).total_seconds() < 300:
+    #     print(f"[{now}] Skip cron: recent activity detected")
+    #     return {"status": "skipped", "reason": "recent activity"}, 200
     
     try:
         scrape_all_sites()
@@ -550,7 +565,12 @@ def scrape_all_sites():
                         if not a: continue
                         t, h = a.get_text(strip=True), a.get("href", "")
                         url = h if h.startswith("http") else (cfg['domain'] + (h if h.startswith("/") else "/" + h))
-                        
+                        lower_t = t.lower()
+                        lower_url = url.lower()
+                                
+                        if 'jd.com' in lower_url or 'tb.cn' in lower_url or \
+                            'jd.com' in lower_t or 'tb.cn' in lower_t:
+                            continue  # 跳过这条，不再处理               
                         if any(b in url for b in url_black) or any(b in t for b in title_black): continue
                         
                         kw = next((k for k in base_keywords if k.lower() in t.lower()), None)
