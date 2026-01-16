@@ -33,8 +33,8 @@ SITES_CONFIG = {
         "name": "线报库", 
         "domain": "https://new.xianbao.fun", 
         "list_url": "https://new.xianbao.fun/", 
-        "list_selector": "tr, li", 
-        "content_selector": "#mainbox article .article-content, #art-fujia"
+        "list_selector": "#mainbox > div.listbox tr, #mainbox > div.listbox li", 
+        "content_selector": "#mainbox article .article-content, #art-fujia, #mainbox > article > div.art-content > div.art-copyright.br > div:nth-child(1)"
     },
     "iehou": { 
         "name": "爱猴线报", 
@@ -42,7 +42,14 @@ SITES_CONFIG = {
         "list_url": "https://iehou.com/", 
         "list_selector": "#body ul li",
         "content_selector": ".thread-content"
-    }
+    },
+    "xianbao_icu": {
+        "name": "鲸线报",  
+        "domain": "https://xianbao.icu",
+        "list_url": "https://xianbao.icu/xianbao",  
+        "list_selector": "main div div div:nth-child(3) > div:nth-child(2) a, main a[href*='/xianbao/detail'], main a[href*='/detail'], ul li a[href*='/detail']",
+        "content_selector": "main > div:nth-of-type(2) > div > div, .prose, .prose-max, .content, .entry-content, .post-body, .detail-body, .markdown, .article-detail, .text"
+   }
 }
 
 # 银行关键词
@@ -283,17 +290,65 @@ def view():
             r = session_req.get(url, timeout=10)
             r.encoding = 'utf-8'
             soup = BeautifulSoup(r.text, "html.parser")
-            selectors = SITES_CONFIG[site_key]["content_selector"].split(',')
-            content_nodes = []
-            for sel in selectors:
-                node = soup.select_one(sel.strip())
-                if node: content_nodes.append(str(node))
             
-            if content_nodes:
-                full_raw_content = "".join(content_nodes)
-                conn.execute("INSERT OR REPLACE INTO article_content(url, content) VALUES(?,?)", (url, full_raw_content))
-                conn.commit()
-                content = clean_html(full_raw_content, site_key)
+            # 只针对鲸线报使用两个精确容器
+            if site_key == "xianbao_icu":
+                content_parts = []
+                
+                # 第一个容器：核心正文 .article-content（保留完整 HTML）
+                node1 = soup.select_one('#__nuxt > div > section > main > div:nth-child(2) > div.el-col.el-col-24.el-col-xs-24.el-col-lg-16.is-guttered > div > div > div.article-content')
+                if node1:
+                    content_parts.append(str(node1))
+                
+                # 第二个容器：来源 / 其他补充（保留完整 HTML）
+                node2 = soup.select_one('#__nuxt > div > section > main > div:nth-child(2) > div.el-col.el-col-24.el-col-xs-24.el-col-lg-16.is-guttered > div > div > div:nth-child(6) > div > div > div:nth-child(1)')
+                if node2:
+                    content_parts.append(str(node2))
+                
+                if content_parts:
+                    # 合并完整 HTML（两个容器之间加 <br><br> 分隔）
+                    full_raw_content = "<br><br>".join(content_parts)
+                    
+                    # 来源网址变超链接（宽松匹配）
+                    full_raw_content = re.sub(
+                        r'(来源网址|原文链接|原文地址)[：:]?\s*(https?://[^\s<"]+)',
+                        r'<br><br>\1：<a href="\2" target="_blank" rel="noopener noreferrer" style="color:#0066cc; text-decoration:underline;">\2</a><br>',
+                        full_raw_content,
+                        flags=re.IGNORECASE | re.MULTILINE
+                    )
+                    
+                    # 额外处理 HTML 实体和空格
+                    full_raw_content = full_raw_content.replace('&nbsp;', ' ').replace('\xa0', ' ')
+                    
+                    conn.execute("INSERT OR REPLACE INTO article_content(url, content) VALUES(?,?)", (url, full_raw_content))
+                    conn.commit()
+                    content = clean_html(full_raw_content, site_key)
+                    if site_key == "xianbao" and content:
+                        
+                        content = re.sub(
+                            r'原文链接：(https?://[^\s<]+)',
+                            r'<br><br>原文链接：<a href="\1" target="_blank" rel="noopener noreferrer" style="color:#0066cc; text-decoration:underline;">\1</a><br>',
+                            content,
+                            flags=re.IGNORECASE
+                        )
+                else:
+                    content = "暂无核心内容"
+            else:
+                # 其他站点保持原逻辑（不变）
+                selectors = SITES_CONFIG[site_key]["content_selector"].split(',')
+                content_nodes = []
+                for sel in selectors:
+                    node = soup.select_one(sel.strip())
+                    if node: content_nodes.append(str(node))
+                
+                if content_nodes:
+                    full_raw_content = "".join(content_nodes)
+                    conn.execute("INSERT OR REPLACE INTO article_content(url, content) VALUES(?,?)", (url, full_raw_content))
+                    conn.commit()
+                    content = clean_html(full_raw_content, site_key)
+                else:
+                    content = "暂无内容"
+                    
         except Exception as e:
             print(f"Error fetching content: {e}")
             content = "加载原文失败，请尝试点击右上角原文链接。"
@@ -530,7 +585,10 @@ def cron_scrape():
 
 def scrape_all_sites():
     global LAST_ACTIVE_TIME
-    if scrape_lock.locked(): return
+    if scrape_lock.locked():
+        print("抓取锁被占用，跳过本次执行")
+        return
+    
     with scrape_lock:
         try:
             now_beijing = get_beijing_now()
@@ -557,39 +615,90 @@ def scrape_all_sites():
 
             for skey, cfg in SITES_CONFIG.items():
                 try:
+                    print(f"\n=== 开始抓取 {cfg['name']} ({skey}) ===")
                     r = session_req.get(cfg['list_url'], timeout=15)
+                    print(f"  状态码: {r.status_code}")
+                    
                     soup = BeautifulSoup(r.text, "html.parser")
+                    items = soup.select(cfg['list_selector'])
+                    print(f"  找到 {len(items)} 个匹配项")
+                    
                     count = 0
-                    for item in soup.select(cfg['list_selector']):
-                        a = item.select_one("a[href*='view'], a[href*='thread'], a[href*='post']") or item.find("a")
-                        if not a: continue
-                        t, h = a.get_text(strip=True), a.get("href", "")
+                    for idx, item in enumerate(soup.select(cfg['list_selector']), 1):
+                        # --- 修改后的 a 标签提取逻辑 ---
+                        if item.name == 'a':
+                            # 如果 item 本身就是 <a> 标签（常见于鲸线报等站点），直接使用它
+                            # print(f"  [{skey} {idx:02d}] Item 本身就是 <a> 标签，使用它。")
+                            a = item
+                        else:
+                            # 否则，在 item 内部查找合适的 <a>（兼容其他站点）
+                            # print(f"  [{skey} {idx:02d}] Item 不是 <a>，在内部查找 <a>。")
+                            a = item.select_one("a[href*='view'], a[href*='thread'], a[href*='post'], a[href*='/detail'], a[href*='/xianbao/detail']") or item.find("a")
+                        
+                        if not a:
+                            # print(f"  [{skey} {idx:02d}] ERROR: 未能找到 <a> 标签，跳过")
+                            continue
+                        
+                        # 标题和 URL 必须从 a 取
+                        t = a.get_text(strip=True).strip()
+                        if not t or len(t) < 5:
+                            # print(f"  [{skey} {idx:02d}] 标题太短或为空，跳过")
+                            continue
+                        
+                        h = a.get("href", "")
                         url = h if h.startswith("http") else (cfg['domain'] + (h if h.startswith("/") else "/" + h))
                         lower_t = t.lower()
                         lower_url = url.lower()
-                                
-                        if 'jd.com' in lower_url or 'tb.cn' in lower_url or \
-                            'jd.com' in lower_t or 'tb.cn' in lower_t:
-                            continue  # 跳过这条，不再处理               
-                        if any(b in url for b in url_black) or any(b in t for b in title_black): continue
                         
-                        kw = next((k for k in base_keywords if k.lower() in t.lower()), None)
+                        # jd/tb 过滤
+                        if 'jd.com' in lower_url or 'tb.cn' in lower_url or 'jd.com' in lower_t or 'tb.cn' in lower_t:
+                            # print(f"  [{skey} {idx:02d}] jd/tb 过滤跳过")
+                            continue
+                        
+                        # 黑名单过滤
+                        black_hit = any(b in url for b in url_black) or any(b in t for b in title_black)
+                        if black_hit:
+                            # print(f"  [{skey} {idx:02d}] 被黑名单过滤跳过")
+                            continue
+                        
+                        # 关键词匹配
+                        kw = next((k for k in base_keywords if k.lower() in lower_t), None)
                         if kw:
+                            # print(f"  [{skey} {idx:02d}] 匹配关键词: {kw}")
                             tag = kw
                             for b_name, b_v in BANK_KEYWORDS.items():
-                                if kw in b_v: tag = b_name; break
+                                if kw in b_v:
+                                    tag = b_name
+                                    break
                             
+                            # print(f"      → 尝试插入 (tag={tag}) URL: {url}")
                             conn.execute('INSERT OR IGNORE INTO articles (title, url, site_source, match_keyword, original_time) VALUES(?,?,?,?,?)',
-                                         (t, url, skey, tag, now_beijing.strftime("%H:%M")))
-                            if conn.total_changes > 0: count += 1
+                                        (t, url, skey, tag, now_beijing.strftime("%H:%M")))
+                            changes = conn.total_changes
+                            # print(f"      → 插入结果 changes={changes}")
+                            
+                            if changes > 0:
+                                count += 1
+                                # print("      → 成功插入！count +1")
+                            # else:
+                            #     print("      → 未插入（可能是重复URL）")
+                        # else:
+                        #     print(f"  [{skey} {idx:02d}] 无关键词匹配，跳过")
+                        
+                        # print("─" * 80)  # 分隔线，便于阅读
                     stats[cfg['name']] = count
+                
+                
                 except Exception as e:
-                    print(f"Error scraping {skey}: {e}")
+                    print(f"抓取 {skey} 失败: {e}")
                     stats[cfg['name']] = "Error"
-            
+                print(f"  {cfg['name']} 本次新增: {count} 条\n")
             conn.execute("DELETE FROM articles WHERE site_source != 'user' AND updated_at < datetime('now', '-4 days')")
-            conn.execute('INSERT INTO scrape_log(last_scrape) VALUES(?)', (f"[{now_beijing.strftime('%m-%d %H:%M')}] {stats}",))
-            conn.commit(); conn.close()
+            conn.execute('INSERT INTO scrape_log(last_scrape) VALUES(?)', 
+                         (f"[{now_beijing.strftime('%m-%d %H:%M')}] {stats}",))
+            conn.commit()
+            conn.close()
+            
         except Exception as e:
             print(f"Scrape Loop Error: {e}")
 
