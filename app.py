@@ -612,6 +612,10 @@ def scrape_all_sites():
             
             base_keywords = ALL_BANK_VALS + title_white
             stats = {}
+            
+            # --- 新增：用于本次抓取去重的集合 ---
+            seen_titles_this_run = set()
+            # --------------------------------
 
             for skey, cfg in SITES_CONFIG.items():
                 try:
@@ -650,6 +654,12 @@ def scrape_all_sites():
                         lower_t = t.lower()
                         lower_url = url.lower()
                         
+                        # --- 新增：检查本次运行中是否已见过此标题 ---
+                        if t in seen_titles_this_run:
+                            # print(f"  [{skey} {idx:02d}] 标题已在本次运行中出现过，跳过: {t[:50]}...") # 可选的日志
+                            continue
+                        # -----------------------------------------
+                        
                         # jd/tb 过滤
                         if 'jd.com' in lower_url or 'tb.cn' in lower_url or 'jd.com' in lower_t or 'tb.cn' in lower_t:
                             # print(f"  [{skey} {idx:02d}] jd/tb 过滤跳过")
@@ -680,6 +690,9 @@ def scrape_all_sites():
                             if changes > 0:
                                 count += 1
                                 # print("      → 成功插入！count +1")
+                                # --- 新增：如果插入成功，将标题加入本次运行的集合 ---
+                                seen_titles_this_run.add(t)
+                                # -------------------------------------------------
                             # else:
                             #     print("      → 未插入（可能是重复URL）")
                         # else:
@@ -693,9 +706,14 @@ def scrape_all_sites():
                     print(f"抓取 {skey} 失败: {e}")
                     stats[cfg['name']] = "Error"
                 print(f"  {cfg['name']} 本次新增: {count} 条\n")
+            
+            # --- 清理旧数据 ---
             conn.execute("DELETE FROM articles WHERE site_source != 'user' AND updated_at < datetime('now', '-4 days')")
+            
+            # --- 记录日志 ---
             conn.execute('INSERT INTO scrape_log(last_scrape) VALUES(?)', 
                          (f"[{now_beijing.strftime('%m-%d %H:%M')}] {stats}",))
+            
             conn.commit()
             conn.close()
             
