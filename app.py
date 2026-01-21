@@ -235,7 +235,7 @@ def index():
     record_visit()
     now = get_beijing_now()
 
-    next_min = ((now.minute // 10) + 1) * 10
+    next_min = ((now.minute // 5) + 1) * 5
     if next_min >= 60:
         next_refresh_obj = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
     else:
@@ -724,4 +724,5 @@ if __name__ == '__main__':
     get_db_connection().close()
     print("Serving on port 8080...")
     serve(app, host='0.0.0.0', port=8080, threads=80)
+
 
