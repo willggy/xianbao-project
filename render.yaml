@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: xianbao-flask
+    env: python
+    plan: free  # 免费计划
+    branch: main  # 你的分支名，如果是 master 就改成 master
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn -w 4 -k gevent -b 0.0.0.0:$PORT app:app
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12
+      - key: SECRET_KEY
+        sync: false  # 本地不存，Render 里手动填
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: CRON_SECRET
+        sync: false
+    disk:
+      name: data
+      mountPath: /opt/render/project/src/data  # 你的 DATA_DIR 是 ./data
+      sizeGB: 1  # 免费 1GB 够用
