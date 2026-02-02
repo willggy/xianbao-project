@@ -235,7 +235,7 @@ def index():
     record_visit()
     now = get_beijing_now()
 
-    next_min = ((now.minute // 5) + 1) * 5
+    next_min = ((now.minute // 10) + 1) * 10
     if next_min >= 60:
         next_refresh_obj = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
     else:
@@ -295,7 +295,7 @@ def view():
             if site_key == "xianbao_icu":
                 content_parts = []
                 
-                # 第一个容器：核心正文 .article-content（保留完整 HTML）
+                # 第一个容器：核心正文（保留完整 HTML）
                 node1 = soup.select_one('#__nuxt > div > section > main > div:nth-child(2) > div.el-col.el-col-24.el-col-xs-24.el-col-lg-16.is-guttered > div > div > div.article-content')
                 if node1:
                     content_parts.append(str(node1))
@@ -309,28 +309,20 @@ def view():
                     # 合并完整 HTML（两个容器之间加 <br><br> 分隔）
                     full_raw_content = "<br><br>".join(content_parts)
                     
-                    # 来源网址变超链接（宽松匹配）
+                    # 步骤1：清理常见干扰（全角冒号、空格、实体）
+                    full_raw_content = full_raw_content.replace('：', ':').replace('&nbsp;', ' ').replace('\xa0', ' ')
+                    
+                    # 步骤2：来源网址变超链接（更宽松匹配）
                     full_raw_content = re.sub(
-                        r'(来源网址|原文链接|原文地址)[：:]?\s*(https?://[^\s<"]+)',
-                        r'<br><br>\1：<a href="\2" target="_blank" rel="noopener noreferrer" style="color:#0066cc; text-decoration:underline;">\2</a><br>',
+                        r'(来源网址|原文链接|原文地址|来源地址)[:：]?\s*(https?://[^\s<"]+)',
+                        r'<br><br>\1: <a href="\2" target="_blank" rel="noopener noreferrer" style="color:#0066cc; text-decoration:underline;">\2</a><br>',
                         full_raw_content,
                         flags=re.IGNORECASE | re.MULTILINE
                     )
                     
-                    # 额外处理 HTML 实体和空格
-                    full_raw_content = full_raw_content.replace('&nbsp;', ' ').replace('\xa0', ' ')
-                    
                     conn.execute("INSERT OR REPLACE INTO article_content(url, content) VALUES(?,?)", (url, full_raw_content))
                     conn.commit()
                     content = clean_html(full_raw_content, site_key)
-                    if site_key == "xianbao" and content:
-                        
-                        content = re.sub(
-                            r'原文链接：(https?://[^\s<]+)',
-                            r'<br><br>原文链接：<a href="\1" target="_blank" rel="noopener noreferrer" style="color:#0066cc; text-decoration:underline;">\1</a><br>',
-                            content,
-                            flags=re.IGNORECASE
-                        )
                 else:
                     content = "暂无核心内容"
             else:
@@ -522,20 +514,34 @@ def img_proxy():
         return "", 404
 
     try:
-        img_bytes, ctype = fetch_image_cached(url)
-        return Response(img_bytes, content_type=ctype)
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "Referer": "https://new.xianbao.fun/",  # 关键：用源站域名
+            "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            "Connection": "keep-alive",
+            "sec-ch-ua": '"Not_A Brand";v="8", "Chromium";v="122", "Google Chrome";v="122"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"Windows"',
+            "sec-fetch-dest": "image",
+            "sec-fetch-mode": "no-cors",
+            "sec-fetch-site": "cross-site"
+        }
+
+        r = session_req.get(url, headers=headers, timeout=15, stream=True, allow_redirects=True)
+        
+        if r.status_code != 200:
+            print(f"[IMG_PROXY] {url} 返回 {r.status_code}")
+            return "", r.status_code
+
+        content_type = r.headers.get("Content-Type", "image/jpeg")
+        return Response(r.content, content_type=content_type)
 
     except Exception as e:
-        print("[IMG_PROXY ERROR]", e)
-        
-        error_html = f'''
-        <div style="text-align:center; padding:20px; color:#666; font-family: system-ui, sans-serif;">
-            <p>代理加载失败（源站拒绝连接）</p>
-            <p><a href="{url}" target="_blank" style="color:#007aff; text-decoration:underline;">点击查看原图</a></p>
-            <small>（可能需科学上网或稍后重试）</small>
-        </div>
-        '''
-        return Response(error_html, content_type='text/html')
+        print(f"[IMG_PROXY ERROR] {url}: {e}")
+        transparent_png = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y1GNnUAAAAASUVORK5CYII=")
+        return Response(transparent_png, content_type="image/png")
 
 
 @app.route('/login', methods=['GET', 'POST'])
@@ -613,9 +619,8 @@ def scrape_all_sites():
             base_keywords = ALL_BANK_VALS + title_white
             stats = {}
             
-            # --- 新增：用于本次抓取去重的集合 ---
+            # 用于本次抓取去重的集合（标题标准化后）
             seen_titles_this_run = set()
-            # --------------------------------
 
             for skey, cfg in SITES_CONFIG.items():
                 try:
@@ -628,7 +633,7 @@ def scrape_all_sites():
                     print(f"  找到 {len(items)} 个匹配项")
                     
                     count = 0
-                    for idx, item in enumerate(soup.select(cfg['list_selector']), 1):
+                    for idx, item in enumerate(items, 1):
                         # --- 修改后的 a 标签提取逻辑 ---
                         if item.name == 'a':
                             # 如果 item 本身就是 <a> 标签（常见于鲸线报等站点），直接使用它
@@ -654,11 +659,16 @@ def scrape_all_sites():
                         lower_t = t.lower()
                         lower_url = url.lower()
                         
-                        # --- 新增：检查本次运行中是否已见过此标题 ---
-                        if t in seen_titles_this_run:
-                            # print(f"  [{skey} {idx:02d}] 标题已在本次运行中出现过，跳过: {t[:50]}...") # 可选的日志
+                        # --- 标题规范化 + 本次运行去重 ---
+                        normalized_title = re.sub(r'\s+', ' ', t.strip().lower())
+                        normalized_title = re.sub(r'[，。！？、；：“”‘’（）【】]', '', normalized_title)
+                        
+                        if normalized_title in seen_titles_this_run:
+                            # print(f"  [{skey} {idx:02d}] 标题已在本次运行中出现过，跳过: {t[:50]}...")
                             continue
-                        # -----------------------------------------
+                        
+                        seen_titles_this_run.add(normalized_title)
+                        # -----------------------------------------------
                         
                         # jd/tb 过滤
                         if 'jd.com' in lower_url or 'tb.cn' in lower_url or 'jd.com' in lower_t or 'tb.cn' in lower_t:
@@ -690,21 +700,19 @@ def scrape_all_sites():
                             if changes > 0:
                                 count += 1
                                 # print("      → 成功插入！count +1")
-                                # --- 新增：如果插入成功，将标题加入本次运行的集合 ---
-                                seen_titles_this_run.add(t)
-                                # -------------------------------------------------
                             # else:
                             #     print("      → 未插入（可能是重复URL）")
                         # else:
                         #     print(f"  [{skey} {idx:02d}] 无关键词匹配，跳过")
                         
                         # print("─" * 80)  # 分隔线，便于阅读
+                    
                     stats[cfg['name']] = count
-                
                 
                 except Exception as e:
                     print(f"抓取 {skey} 失败: {e}")
                     stats[cfg['name']] = "Error"
+                
                 print(f"  {cfg['name']} 本次新增: {count} 条\n")
             
             # --- 清理旧数据 ---
@@ -724,5 +732,4 @@ if __name__ == '__main__':
     get_db_connection().close()
     print("Serving on port 8080...")
     serve(app, host='0.0.0.0', port=8080, threads=80)
-
 
