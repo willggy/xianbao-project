@@ -5,6 +5,8 @@ import time
 import base64
 import re
 import gc  # 用于手动回收内存
+import ipaddress
+import socket
 from datetime import datetime, timedelta, timezone
 from functools import wraps, lru_cache
 from urllib.parse import quote, unquote, urlparse
@@ -12,7 +14,6 @@ import requests
 from requests.adapters import HTTPAdapter
 from flask import Flask, flash, render_template, request, Response, redirect, session, url_for
 from bs4 import BeautifulSoup
-from apscheduler.schedulers.background import BackgroundScheduler
 from waitress import serve
 
 # ==========================================
@@ -26,6 +27,8 @@ app.secret_key = os.environ.get('SECRET_KEY', 'xianbao_secret_key_888')
 ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', '123')  
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024 
 CRON_SECRET = os.environ.get('CRON_SECRET', 'xianbao_secret_key_999')
+# ALLOW_INSECURE_DEFAULTS=1--本地开发环境放行
+ALLOW_INSECURE_DEFAULTS = os.environ.get('ALLOW_INSECURE_DEFAULTS', '').strip() == '1'
 
 # 站点配置
 SITES_CONFIG = {
@@ -90,6 +93,43 @@ def get_beijing_now():
     # 为什么要移除时区？因为你的数据库和后续的减法逻辑使用的是简单的数字计算，
     # 如果保留时区，Python 会报错 "can't subtract offset-naive and offset-aware datetimes"
     return datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=8))).replace(tzinfo=None)
+
+
+def _warn(msg: str):
+    print(f"[SECURITY WARNING] {msg}")
+
+
+def ensure_secure_config_or_exit():
+    """
+    上线安全保护：如果仍在使用默认密钥/默认密码，则拒绝启动。
+    本地开发可设置 ALLOW_INSECURE_DEFAULTS=1 放行（会打印强警告）。
+    """
+    problems = []
+
+    if not os.environ.get('SECRET_KEY') or app.secret_key == 'xianbao_secret_key_888':
+        problems.append("SECRET_KEY 未设置或仍为默认值")
+
+    if not os.environ.get('ADMIN_PASSWORD') or ADMIN_PASSWORD == '123':
+        problems.append("ADMIN_PASSWORD 未设置或仍为默认值")
+
+    if not os.environ.get('CRON_SECRET') or CRON_SECRET == 'xianbao_secret_key_999':
+        problems.append("CRON_SECRET 未设置或仍为默认值")
+
+    if not problems:
+        return
+
+    msg = (
+        "检测到不安全的默认配置，将拒绝启动。\n"
+        + "\n".join([f"- {p}" for p in problems])
+        + "\n\n请在环境变量中设置：SECRET_KEY、ADMIN_PASSWORD、CRON_SECRET。\n"
+        "如仅本机临时调试，可设置 ALLOW_INSECURE_DEFAULTS=1 跳过（不建议对公网）。"
+    )
+
+    if ALLOW_INSECURE_DEFAULTS:
+        _warn(msg)
+        return
+
+    raise RuntimeError(msg)
 
 # 初始化活跃时间
 LAST_ACTIVE_TIME = get_beijing_now()
@@ -536,6 +576,55 @@ def img_proxy():
         print("[WARN] Blocked invalid scheme:", url)
         return "", 404
 
+    def _is_ip_private_or_disallowed(ip: str) -> bool:
+        try:
+            addr = ipaddress.ip_address(ip)
+        except ValueError:
+            return True
+        return any([
+            addr.is_private,
+            addr.is_loopback,
+            addr.is_link_local,
+            addr.is_reserved,
+            addr.is_multicast,
+            getattr(addr, "is_unspecified", False),
+        ])
+
+    def _host_resolves_to_disallowed_ip(host: str) -> bool:
+        host = (host or "").strip().lower()
+        if not host:
+            return True
+        if host in {"localhost"}:
+            return True
+
+        # IP 字面量
+        try:
+            ipaddress.ip_address(host)
+            return _is_ip_private_or_disallowed(host)
+        except ValueError:
+            pass
+
+        # 解析域名 A/AAAA，任一命中内网/保留即拒绝
+        try:
+            infos = socket.getaddrinfo(host, None)
+        except Exception:
+            return True
+
+        resolved = set()
+        for info in infos:
+            sockaddr = info[4]
+            if isinstance(sockaddr, tuple) and sockaddr:
+                resolved.add(sockaddr[0])
+        if not resolved:
+            return True
+
+        return any(_is_ip_private_or_disallowed(ip) for ip in resolved)
+
+    host = parsed.hostname or ""
+    if _host_resolves_to_disallowed_ip(host):
+        print("[WARN] Blocked SSRF host:", host, "url:", url)
+        return "", 404
+
     try:
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
@@ -554,6 +643,18 @@ def img_proxy():
 
         # 【优化】使用 stream=True 进行流式传输，显著降低 RAM 占用
         r = session_req.get(url, headers=headers, timeout=15, stream=True, allow_redirects=True)
+
+        # SSRF 防护：如果发生跳转，二次校验最终落点（防止跳到内网）
+        final_url = getattr(r, "url", "") or url
+        final_parsed = urlparse(final_url)
+        final_host = final_parsed.hostname or ""
+        if final_parsed.scheme not in ("http", "https") or _host_resolves_to_disallowed_ip(final_host):
+            print("[WARN] Blocked SSRF redirect:", final_url)
+            try:
+                r.close()
+            except Exception:
+                pass
+            return "", 404
         
         if r.status_code != 200:
             print(f"[IMG_PROXY] {url} 返回 {r.status_code}")
@@ -624,6 +725,17 @@ def cron_scrape():
 # 4. 抓取与启动
 # ==========================================
 
+def normalize_title(title_text):
+    """标题标准化函数：去除空格和标点符号"""
+    if not title_text:
+        return ""
+    # 去除所有空格、换行符、制表符
+    t = re.sub(r'\s+', '', title_text)
+    # 去除中英文常见标点符号
+    punctuation = r"""！？｡＂＃＄％＆＇（）＊＋，－／：；＜＝＞＠［＼］＾＿｀｛｜｝～｟｠｢｣､、〃》「」『』【】〔〕〖〗〘〙〚〛〜〝〞〟〰〾〿–—''‛""„‟…‧·.!,;:?"'()[]{}<>/-_=+"""
+    t = re.sub(f"[{re.escape(punctuation)}]", "", t)
+    return t.lower()
+
 def scrape_all_sites():
     global LAST_ACTIVE_TIME
     if scrape_lock.locked():
@@ -656,6 +768,12 @@ def scrape_all_sites():
             
             # 用于本次抓取去重的集合（标题标准化后）
             seen_titles_this_run = set()
+            
+            # 【新增】获取最近30分钟的标题用于跨任务去重
+            recent_articles = conn.execute(
+                "SELECT title FROM articles WHERE updated_at > datetime('now', '-30 minutes')"
+            ).fetchall()
+            recent_norm_titles = {normalize_title(row['title']) for row in recent_articles}
 
             for skey, cfg in SITES_CONFIG.items():
                 try:
@@ -672,22 +790,16 @@ def scrape_all_sites():
                     for idx, item in enumerate(items, 1):
                         # --- 修改后的 a 标签提取逻辑 ---
                         if item.name == 'a':
-                            # 如果 item 本身就是 <a> 标签（常见于鲸线报等站点），直接使用它
-                            # print(f"  [{skey} {idx:02d}] Item 本身就是 <a> 标签，使用它。")
                             a = item
                         else:
-                            # 否则，在 item 内部查找合适的 <a>（兼容其他站点）
-                            # print(f"  [{skey} {idx:02d}] Item 不是 <a>，在内部查找 <a>。")
                             a = item.select_one("a[href*='view'], a[href*='thread'], a[href*='post'], a[href*='/detail'], a[href*='/xianbao/detail']") or item.find("a")
                         
                         if not a:
-                            # print(f"  [{skey} {idx:02d}] ERROR: 未能找到 <a> 标签，跳过")
                             continue
                         
                         # 标题和 URL 必须从 a 取
                         t = a.get_text(strip=True).strip()
                         if not t or len(t) < 5:
-                            # print(f"  [{skey} {idx:02d}] 标题太短或为空，跳过")
                             continue
                         
                         h = a.get("href", "")
@@ -695,26 +807,15 @@ def scrape_all_sites():
                         lower_t = t.lower()
                         lower_url = url.lower()
                         
-                        # --- 标题规范化 + 本次运行去重 ---
-                        normalized_title = re.sub(r'\s+', ' ', t.strip().lower())
-                        normalized_title = re.sub(r'[，。！？、；：“”‘’（）【】]', '', normalized_title)
-                        
-                        if normalized_title in seen_titles_this_run:
-                            # print(f"  [{skey} {idx:02d}] 标题已在本次运行中出现过，跳过: {t[:50]}...")
+                        # --- 标题规范化 + 本次运行/近30分钟去重（去符号/去空白/统一大小写） ---
+                        norm_title = normalize_title(t)
+                        if not norm_title:
+                            continue
+                        if norm_title in seen_titles_this_run:
+                            continue
+                        if norm_title in recent_norm_titles:
                             continue
                         
-                        seen_titles_this_run.add(normalized_title)
-                        # -----------------------------------------------
-                        
-                        # 【新增】30分钟跨任务标题去重 (核心防刷屏)
-                        is_dup = conn.execute("""
-                            SELECT 1 FROM articles 
-                            WHERE title = ? AND updated_at > datetime('now', '-30 minutes') 
-                            LIMIT 1
-                        """, (t,)).fetchone()
-                        
-                        if is_dup:
-                            continue
                         
                         # jd/tb 过滤
                         if 'jd.com' in lower_url or 'tb.cn' in lower_url or 'jd.com' in lower_t or 'tb.cn' in lower_t:
@@ -730,28 +831,21 @@ def scrape_all_sites():
                         # 关键词匹配
                         kw = next((k for k in base_keywords if k.lower() in lower_t), None)
                         if kw:
-                            # print(f"  [{skey} {idx:02d}] 匹配关键词: {kw}")
+                            # 只对“会被写入数据库”的候选做本次运行去重，避免误伤（如先遇到黑名单 URL）
+                            seen_titles_this_run.add(norm_title)
                             tag = kw
                             for b_name, b_v in BANK_KEYWORDS.items():
                                 if kw in b_v:
                                     tag = b_name
                                     break
                             
-                            # print(f"      → 尝试插入 (tag={tag}) URL: {url}")
+                            before_changes = conn.total_changes
                             conn.execute('INSERT OR IGNORE INTO articles (title, url, site_source, match_keyword, original_time) VALUES(?,?,?,?,?)',
                                         (t, url, skey, tag, now_beijing.strftime("%H:%M")))
-                            changes = conn.total_changes
-                            # print(f"      → 插入结果 changes={changes}")
+                            inserted = (conn.total_changes - before_changes) > 0
                             
-                            if changes > 0:
+                            if inserted:
                                 count += 1
-                                # print("      → 成功插入！count +1")
-                            # else:
-                            #     print("      → 未插入（可能是重复URL）")
-                        # else:
-                        #     print(f"  [{skey} {idx:02d}] 无关键词匹配，跳过")
-                        
-                        # print("─" * 80)  # 分隔线，便于阅读
                     
                     # 【核心优化】显式销毁解析树，手动触发垃圾回收
                     soup.decompose()
@@ -780,6 +874,6 @@ def scrape_all_sites():
 
 if __name__ == '__main__':
     get_db_connection().close()
+    ensure_secure_config_or_exit()
     print("Serving on port 8080...")
     serve(app, host='0.0.0.0', port=8080, threads=80)
-
