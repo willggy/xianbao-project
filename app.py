@@ -4,7 +4,7 @@ import threading
 import time
 import base64
 import re
-# 【修改1】引入 timezone 模块以支持新版时间标准
+import gc  # 用于手动回收内存
 from datetime import datetime, timedelta, timezone
 from functools import wraps, lru_cache
 from urllib.parse import quote, unquote, urlparse
@@ -126,6 +126,10 @@ def get_db_connection():
     conn.execute('CREATE TABLE IF NOT EXISTS scrape_log(id INTEGER PRIMARY KEY AUTOINCREMENT, last_scrape TEXT)')
     conn.execute('CREATE TABLE IF NOT EXISTS visit_stats(ip TEXT PRIMARY KEY, visit_count INTEGER DEFAULT 1, last_visit TIMESTAMP DEFAULT CURRENT_TIMESTAMP)')
     
+    # 【新增索引】加速 30 分钟去重和 API 检查
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_articles_title_time ON articles(title, updated_at)')
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_articles_id_desc ON articles(id DESC)')
+    
     conn.commit()
     return conn
 
@@ -138,7 +142,8 @@ def clean_html(html_content, site_key):
     if not html_content:
         return ""
 
-    soup = BeautifulSoup(html_content, "html.parser")
+    # 【优化】使用 lxml 解析器
+    soup = BeautifulSoup(html_content, "lxml")
 
     for tag in soup.find_all(True):
 
@@ -204,7 +209,10 @@ def clean_html(html_content, site_key):
                 'style': 'color:#007aff; text-decoration:underline; word-break:break-all;'
             }
 
-    return str(soup)
+    # 【优化】先保存结果再销毁解析树
+    result = str(soup)
+    soup.decompose()
+    return result
 
 
 
@@ -235,13 +243,18 @@ def index():
     record_visit()
     now = get_beijing_now()
 
-    next_min = ((now.minute // 10) + 1) * 10
-    if next_min >= 60:
+    # --- 修改后的 3 分钟刷新逻辑 ---
+    # 计算相对于当前小时，下一个 3 分钟的整点
+    # 例如：13:01 -> 13:03, 13:05 -> 13:06
+    next_interval = ((now.minute // 3) + 1) * 3
+    
+    if next_interval >= 60:
         next_refresh_obj = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
     else:
-        next_refresh_obj = now.replace(minute=next_min, second=0, microsecond=0)
+        next_refresh_obj = now.replace(minute=next_interval, second=0, microsecond=0)
 
     next_refresh_time = next_refresh_obj.strftime("%H:%M")
+    # ----------------------------
 
     tag = request.args.get('tag')
     q = request.args.get('q')
@@ -270,7 +283,8 @@ def index():
                            current_tag=tag, 
                            q=q, 
                            current_page=page, 
-                           total_pages=(total+PER_PAGE-1)//PER_PAGE)
+                           total_pages=(total+PER_PAGE-1)//PER_PAGE,
+                           latest_id=articles[0]['id'] if articles else 0)
 
 @app.route("/view")
 def view():
@@ -496,6 +510,15 @@ def fetch_image_cached(url):
     return r.content, r.headers.get("Content-Type", "image/jpeg")
 
 
+@app.route('/api/check_update')
+def check_update():
+    """【新增】轻量级检查接口，极度节省流量"""
+    conn = get_db_connection()
+    row = conn.execute("SELECT id FROM articles ORDER BY id DESC LIMIT 1").fetchone()
+    conn.close()
+    return {"last_id": row['id'] if row else 0}
+
+
 @app.route('/img_proxy')
 def img_proxy():
     raw = request.args.get('url', '').strip()
@@ -529,6 +552,7 @@ def img_proxy():
             "sec-fetch-site": "cross-site"
         }
 
+        # 【优化】使用 stream=True 进行流式传输，显著降低 RAM 占用
         r = session_req.get(url, headers=headers, timeout=15, stream=True, allow_redirects=True)
         
         if r.status_code != 200:
@@ -536,7 +560,18 @@ def img_proxy():
             return "", r.status_code
 
         content_type = r.headers.get("Content-Type", "image/jpeg")
-        return Response(r.content, content_type=content_type)
+        
+        # 【优化】验证 Content-Type 是否为图片类型
+        if not content_type or not any(img_type in content_type.lower() for img_type in ['image/', 'application/octet-stream']):
+            print(f"[WARN] Content-Type 不是图片类型: {content_type}")
+            return "", 404
+
+        # 【优化】使用生成器流式传输数据，不再将整个图片存入内存
+        def generate():
+            for chunk in r.iter_content(chunk_size=4096):
+                yield chunk
+        
+        return Response(generate(), content_type=content_type, status=200)
 
     except Exception as e:
         print(f"[IMG_PROXY ERROR] {url}: {e}")
@@ -628,7 +663,8 @@ def scrape_all_sites():
                     r = session_req.get(cfg['list_url'], timeout=15)
                     print(f"  状态码: {r.status_code}")
                     
-                    soup = BeautifulSoup(r.text, "html.parser")
+                    # 【优化】改用 lxml 解析器，内存占用更低
+                    soup = BeautifulSoup(r.text, "lxml")
                     items = soup.select(cfg['list_selector'])
                     print(f"  找到 {len(items)} 个匹配项")
                     
@@ -670,6 +706,16 @@ def scrape_all_sites():
                         seen_titles_this_run.add(normalized_title)
                         # -----------------------------------------------
                         
+                        # 【新增】30分钟跨任务标题去重 (核心防刷屏)
+                        is_dup = conn.execute("""
+                            SELECT 1 FROM articles 
+                            WHERE title = ? AND updated_at > datetime('now', '-30 minutes') 
+                            LIMIT 1
+                        """, (t,)).fetchone()
+                        
+                        if is_dup:
+                            continue
+                        
                         # jd/tb 过滤
                         if 'jd.com' in lower_url or 'tb.cn' in lower_url or 'jd.com' in lower_t or 'tb.cn' in lower_t:
                             # print(f"  [{skey} {idx:02d}] jd/tb 过滤跳过")
@@ -706,6 +752,10 @@ def scrape_all_sites():
                         #     print(f"  [{skey} {idx:02d}] 无关键词匹配，跳过")
                         
                         # print("─" * 80)  # 分隔线，便于阅读
+                    
+                    # 【核心优化】显式销毁解析树，手动触发垃圾回收
+                    soup.decompose()
+                    gc.collect()
                     
                     stats[cfg['name']] = count
                 
