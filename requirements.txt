@@ -4,4 +4,5 @@ beautifulsoup4
 lxml
 apscheduler
 waitress
-
+psycopg[binary]
+python-dotenv
